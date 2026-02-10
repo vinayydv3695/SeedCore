@@ -1,14 +1,14 @@
-# SeedCore 🌱
+# SeedCore
 
 **A modern BitTorrent client with cloud debrid integration**
 
 SeedCore is a lightweight, fast BitTorrent client that supports both traditional torrenting and cloud-based downloading through Real-Debrid and Torbox services.
 
-![SeedCore Main Interface](public/screenshots/main-interface.png)
+![SeedCore Main Interface](screenshots/main-interface.png)
 
 ---
 
-## ✨ Features
+## Features
 
 - **Traditional Torrenting**: Download torrents directly using the BitTorrent protocol
 - **Cloud Downloads**: Instantly download cached torrents through Real-Debrid or Torbox
@@ -19,7 +19,7 @@ SeedCore is a lightweight, fast BitTorrent client that supports both traditional
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -34,13 +34,13 @@ SeedCore is a lightweight, fast BitTorrent client that supports both traditional
 
 ---
 
-## 📖 How to Use
+## How to Use
 
 ### 1. Setting Up Master Password
 
 When you first open SeedCore, you'll need to set a **master password** to encrypt your API keys securely.
 
-![Settings Page](public/screenshots/settings.png)
+![Settings Page](screenshots/settings.png)
 
 1. Go to **Settings** (gear icon in the sidebar)
 2. Enter a strong master password
@@ -55,7 +55,7 @@ When you first open SeedCore, you'll need to set a **master password** to encryp
 
 To use cloud downloads, you need to add your Real-Debrid or Torbox API key.
 
-![Debrid Settings](public/screenshots/debrid-settings.png)
+![Debrid Settings](screenshots/debrid-settings.png)
 
 #### Getting Your API Key
 
@@ -85,7 +85,7 @@ To use cloud downloads, you need to add your Real-Debrid or Torbox API key.
 
 Click the **+** button in the toolbar to add a torrent.
 
-![Add Torrent](public/screenshots/add-torrent.png)
+![Add Torrent](screenshots/add-torrent.png)
 
 #### Download Modes
 
@@ -134,7 +134,7 @@ Click the **+** button in the toolbar to add a torrent.
 
 ### 4. Monitoring Downloads
 
-![Torrent Details](public/screenshots/torrent-details.png)
+![Torrent Details](screenshots/torrent-details.png)
 
 The main interface shows all your torrents with:
 
@@ -148,7 +148,7 @@ The main interface shows all your torrents with:
 
 Click on a torrent to see detailed file-by-file progress.
 
-![Files Tab](public/screenshots/files-tab.png)
+![Files Tab](screenshots/files-tab.png)
 
 For cloud downloads, you'll see:
 
@@ -158,7 +158,7 @@ For cloud downloads, you'll see:
 
 ---
 
-## 🔧 How It Works
+## How It Works
 
 ### Traditional Torrenting
 
@@ -188,7 +188,7 @@ For cloud downloads, you'll see:
 
 ---
 
-## 🎯 Tips & Tricks
+## Tips & Tricks
 
 **Cloud Downloads**
 
@@ -215,7 +215,7 @@ For cloud downloads, you'll see:
 
 ---
 
-## ❓ Troubleshooting
+## Troubleshooting
 
 ### "Failed to save credentials"
 
@@ -257,7 +257,7 @@ For cloud downloads, you'll see:
 
 ---
 
-## 🔒 Privacy & Security
+## Privacy & Security
 
 - **Master password** encrypts all API keys using AES-256-GCM
 - **API keys** are never stored in plain text
@@ -266,7 +266,7 @@ For cloud downloads, you'll see:
 
 ---
 
-## 🐛 Reporting Issues
+## Reporting Issues
 
 Found a bug? Have a feature request?
 
@@ -279,13 +279,13 @@ Found a bug? Have a feature request?
 
 ---
 
-## 📜 License
+## License
 
 MIT License - Free to use, modify, and distribute
 
 ---
 
-## 🙏 Credits
+## Credits
 
 **Built with:**
 
@@ -300,4 +300,4 @@ MIT License - Free to use, modify, and distribute
 
 ---
 
-**Enjoy downloading!** 🚀
+**Enjoy downloading!**
