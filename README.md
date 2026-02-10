@@ -1,10 +1,22 @@
+<div align="center">
+
+<img src="screenshots/logo.png" alt="SeedCore Logo" width="120" height="120">
+
 # SeedCore
 
 **A modern BitTorrent client with cloud debrid integration**
 
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/vinayydv3695/SeedCore/releases)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/vinayydv3695/SeedCore?style=social)](https://github.com/vinayydv3695/SeedCore/stargazers)
+[![Forks](https://img.shields.io/github/forks/vinayydv3695/SeedCore?style=social)](https://github.com/vinayydv3695/SeedCore/network/members)
+[![Issues](https://img.shields.io/github/issues/vinayydv3695/SeedCore)](https://github.com/vinayydv3695/SeedCore/issues)
+
 SeedCore is a lightweight, fast BitTorrent client that supports both traditional torrenting and cloud-based downloading through Real-Debrid and Torbox services.
 
-![SeedCore Main Interface](screenshots/main-interface.png)
+[Features](#features) • [Installation](#getting-started) • [Usage](#how-to-use) • [Screenshots](#screenshots) • [Credits](#credits)
+
+</div>
 
 ---
 
@@ -16,6 +28,40 @@ SeedCore is a lightweight, fast BitTorrent client that supports both traditional
 - **Smart Mode**: Intelligently choose the best download method
 - **Real-time Progress**: Track download progress for individual files
 - **Beautiful Interface**: Modern, clean UI with dark theme
+- **Secure Encryption**: AES-256-GCM encryption for API keys
+- **Cross-Platform**: Works on Windows, macOS, and Linux
+
+---
+
+## Screenshots
+
+<div align="center">
+
+### Main Interface
+
+![Main Interface](screenshots/main-interface.png)
+
+### Add Torrent Dialog
+
+![Add Torrent](screenshots/add-torrent.png)
+
+### Settings & Master Password
+
+![Settings](screenshots/settings.png)
+
+### Debrid API Configuration
+
+![Debrid Settings](screenshots/debrid-settings.png)
+
+### Active Downloads
+
+![Torrent Details](screenshots/torrent-details.png)
+
+### Per-File Progress Tracking
+
+![Files Tab](screenshots/files-tab.png)
+
+</div>
 
 ---
 
@@ -28,7 +74,7 @@ SeedCore is a lightweight, fast BitTorrent client that supports both traditional
 
 ### Installation
 
-1. Download the latest release for your platform
+1. Download the latest release for your platform from [Releases](https://github.com/vinayydv3695/SeedCore/releases)
 2. Install and launch SeedCore
 3. (Optional) Configure your debrid service credentials
 
@@ -39,8 +85,6 @@ SeedCore is a lightweight, fast BitTorrent client that supports both traditional
 ### 1. Setting Up Master Password
 
 When you first open SeedCore, you'll need to set a **master password** to encrypt your API keys securely.
-
-![Settings Page](screenshots/settings.png)
 
 1. Go to **Settings** (gear icon in the sidebar)
 2. Enter a strong master password
@@ -54,8 +98,6 @@ When you first open SeedCore, you'll need to set a **master password** to encryp
 ### 2. Configuring Debrid Services (Optional)
 
 To use cloud downloads, you need to add your Real-Debrid or Torbox API key.
-
-![Debrid Settings](screenshots/debrid-settings.png)
 
 #### Getting Your API Key
 
@@ -84,8 +126,6 @@ To use cloud downloads, you need to add your Real-Debrid or Torbox API key.
 ### 3. Adding a Torrent
 
 Click the **+** button in the toolbar to add a torrent.
-
-![Add Torrent](screenshots/add-torrent.png)
 
 #### Download Modes
 
@@ -134,8 +174,6 @@ Click the **+** button in the toolbar to add a torrent.
 
 ### 4. Monitoring Downloads
 
-![Torrent Details](screenshots/torrent-details.png)
-
 The main interface shows all your torrents with:
 
 - **Name** and **Size**
@@ -147,8 +185,6 @@ The main interface shows all your torrents with:
 #### Per-File Progress
 
 Click on a torrent to see detailed file-by-file progress.
-
-![Files Tab](screenshots/files-tab.png)
 
 For cloud downloads, you'll see:
 
@@ -266,11 +302,29 @@ For cloud downloads, you'll see:
 
 ---
 
+## Technology Stack
+
+**Backend**
+
+- Rust - Systems programming language
+- Tauri 2 - Lightweight desktop framework
+- Tokio - Async runtime
+- SQLite - Embedded database
+
+**Frontend**
+
+- React 19 - UI framework
+- TypeScript - Type-safe JavaScript
+- Tailwind CSS - Utility-first styling
+- Vite - Build tool
+
+---
+
 ## Reporting Issues
 
 Found a bug? Have a feature request?
 
-1. Check if it's already reported in [Issues](../../issues)
+1. Check if it's already reported in [Issues](https://github.com/vinayydv3695/SeedCore/issues)
 2. Create a new issue with:
    - Description of the problem
    - Steps to reproduce
@@ -282,6 +336,8 @@ Found a bug? Have a feature request?
 ## License
 
 MIT License - Free to use, modify, and distribute
+
+See [LICENSE](LICENSE) file for details.
 
 ---
 
@@ -300,4 +356,12 @@ MIT License - Free to use, modify, and distribute
 
 ---
 
-**Enjoy downloading!**
+<div align="center">
+
+**Made with ❤️ by [vinayydv3695](https://github.com/vinayydv3695)**
+
+If you find this project useful, please consider giving it a star!
+
+[![GitHub stars](https://img.shields.io/github/stars/vinayydv3695/SeedCore?style=social)](https://github.com/vinayydv3695/SeedCore/stargazers)
+
+</div>
