@@ -3,17 +3,34 @@
 use super::bitfield::Bitfield;
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectionStrategy {
-    /// Select rarest pieces first (standard BitTorrent strategy)
     RarestFirst,
-    /// Select pieces sequentially (good for streaming/previewing)
     Sequential,
-    /// Random selection (useful for initial pieces)
     Random,
-    /// Endgame mode: request all remaining pieces from all peers
     Endgame,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PiecePriority {
+    /// Skip downloading this piece (unless needed for other files)
+    Skip = 0,
+    /// Low priority
+    Low = 1,
+    /// Normal priority (default)
+    Normal = 2,
+    /// High priority (download first)
+    High = 3,
+    /// Critical/Sequential (e.g., streaming)
+    Critical = 4,
+}
+
+impl Default for PiecePriority {
+    fn default() -> Self {
+        PiecePriority::Normal
+    }
 }
 
 /// Manages piece selection based on strategy
@@ -22,6 +39,8 @@ pub struct PieceSelector {
     /// Track piece rarity across all connected peers
     /// piece_index -> count of peers that have it
     piece_availability: HashMap<usize, usize>,
+    /// Piece priorities (index -> priority)
+    priorities: HashMap<usize, PiecePriority>,
 }
 
 impl PieceSelector {
@@ -29,6 +48,16 @@ impl PieceSelector {
         Self {
             strategy,
             piece_availability: HashMap::new(),
+            priorities: HashMap::new(),
+        }
+    }
+
+    /// Set priority for a piece
+    pub fn set_piece_priority(&mut self, piece_idx: usize, priority: PiecePriority) {
+        if priority == PiecePriority::Normal {
+            self.priorities.remove(&piece_idx);
+        } else {
+            self.priorities.insert(piece_idx, priority);
         }
     }
 
@@ -73,15 +102,37 @@ impl PieceSelector {
         // Filter out pieces we're already requesting
         candidates.retain(|piece| !pending_pieces.contains(piece));
 
+        // Filter out skipped pieces (unless they are the only ones left, 
+        // but typically we don't want to download skipped pieces at all)
+        // For now, strictly filter out Skip pieces
+        candidates.retain(|&piece| {
+            self.priorities.get(&piece).unwrap_or(&PiecePriority::Normal) != &PiecePriority::Skip
+        });
+
         if candidates.is_empty() {
             return None;
         }
 
+        // Group by priority
+        // We want to pick the highest priority group first
+        // Find max priority among candidates
+        let max_priority = candidates
+            .iter()
+            .map(|&p| self.priorities.get(&p).unwrap_or(&PiecePriority::Normal))
+            .max()
+            .unwrap_or(&PiecePriority::Normal);
+
+        // Filter candidates to only those with max_priority
+        let best_candidates: Vec<usize> = candidates
+            .into_iter()
+            .filter(|&p| self.priorities.get(&p).unwrap_or(&PiecePriority::Normal) == max_priority)
+            .collect();
+
         match self.strategy {
-            SelectionStrategy::RarestFirst => self.select_rarest(&candidates),
-            SelectionStrategy::Sequential => self.select_sequential(&candidates),
-            SelectionStrategy::Random => self.select_random(&candidates),
-            SelectionStrategy::Endgame => self.select_endgame(&candidates),
+            SelectionStrategy::RarestFirst => self.select_rarest(&best_candidates),
+            SelectionStrategy::Sequential => self.select_sequential(&best_candidates),
+            SelectionStrategy::Random => self.select_random(&best_candidates),
+            SelectionStrategy::Endgame => self.select_endgame(&best_candidates),
         }
     }
 

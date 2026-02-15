@@ -27,6 +27,18 @@ pub enum Error {
     /// Torrent not found
     TorrentNotFound(String),
 
+    /// Request timed out
+    Timeout(String),
+
+    /// Cryptographic operation failed
+    CryptoError(String),
+
+    /// Database operation failed
+    DatabaseError(String),
+
+    /// Debrid service error
+    DebridError(String),
+
     /// Generic error
     Other(String),
 }
@@ -40,6 +52,10 @@ impl fmt::Display for Error {
             Self::IoError(msg) => write!(f, "I/O error: {msg}"),
             Self::InvalidData(msg) => write!(f, "Invalid data: {msg}"),
             Self::TorrentNotFound(msg) => write!(f, "Torrent not found: {msg}"),
+            Self::Timeout(msg) => write!(f, "Timeout: {msg}"),
+            Self::CryptoError(msg) => write!(f, "Crypto error: {msg}"),
+            Self::DatabaseError(msg) => write!(f, "Database error: {msg}"),
+            Self::DebridError(msg) => write!(f, "Debrid error: {msg}"),
             Self::Other(msg) => write!(f, "{msg}"),
         }
     }
@@ -67,6 +83,16 @@ impl From<anyhow::Error> for Error {
 
 impl From<reqwest::Error> for Error {
     fn from(err: reqwest::Error) -> Self {
-        Self::NetworkError(err.to_string())
+        if err.is_timeout() {
+            Self::Timeout(err.to_string())
+        } else {
+            Self::NetworkError(err.to_string())
+        }
+    }
+}
+
+impl From<sled::Error> for Error {
+    fn from(err: sled::Error) -> Self {
+        Self::DatabaseError(err.to_string())
     }
 }

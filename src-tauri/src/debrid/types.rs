@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 /// Debrid provider types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DebridProviderType {
     Torbox,
     RealDebrid,
@@ -28,6 +29,7 @@ impl DebridProviderType {
 
 /// Cache status for a torrent
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CacheStatus {
     pub is_cached: bool,
     pub files: Vec<CachedFile>,
@@ -54,6 +56,7 @@ impl CacheStatus {
 
 /// Cached file information
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CachedFile {
     pub id: usize,
     pub name: String,
@@ -63,6 +66,7 @@ pub struct CachedFile {
 
 /// Debrid file with download link
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DebridFile {
     pub id: String,
     pub name: String,
@@ -74,6 +78,7 @@ pub struct DebridFile {
 
 /// Debrid download progress
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DebridProgress {
     pub torrent_id: String,
     pub status: DebridStatus,
@@ -87,6 +92,7 @@ pub struct DebridProgress {
 
 /// Debrid torrent status
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum DebridStatus {
     /// Waiting for file selection
     WaitingFilesSelection,
@@ -120,6 +126,7 @@ impl DebridStatus {
 
 /// User information from debrid service
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserInfo {
     pub username: String,
     pub email: Option<String>,
@@ -130,6 +137,7 @@ pub struct UserInfo {
 
 /// Connection status
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionStatus {
     pub connected: bool,
     pub valid: bool,
@@ -139,6 +147,7 @@ pub struct ConnectionStatus {
 
 /// Torrent ID from debrid service
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TorrentId {
     pub id: String,
     pub uri: Option<String>,
@@ -146,6 +155,7 @@ pub struct TorrentId {
 
 /// File selection request
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileSelection {
     pub torrent_id: String,
     pub file_ids: Vec<usize>,
@@ -153,6 +163,7 @@ pub struct FileSelection {
 
 /// Download source type
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum DownloadSource {
     /// Pure P2P download
     P2P,

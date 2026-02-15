@@ -382,19 +382,19 @@ impl Metainfo {
 }
 
 /// Get file list with UI metadata for a torrent
-/// TODO: Track per-file progress based on piece completion
-pub fn get_file_list(metainfo: &Metainfo) -> Vec<FileInfoUI> {
+pub fn get_file_list(metainfo: &Metainfo, downloaded_bytes: Option<&[u64]>) -> Vec<FileInfoUI> {
     let mut files = Vec::new();
 
-    for file in &metainfo.info.files {
+    for (i, file) in metainfo.info.files.iter().enumerate() {
         // Join path components with forward slash
         let path = file.path.join("/");
+        let downloaded = downloaded_bytes.and_then(|b| b.get(i)).copied().unwrap_or(0);
 
         files.push(FileInfoUI {
             path,
             size: file.length,
-            downloaded: 0, // TODO: Calculate from piece completion
-            priority: FilePriority::Normal,
+            downloaded,
+            priority: FilePriority::Normal, // TODO: Store and retrieve actual priority
             is_folder: false,
         });
     }

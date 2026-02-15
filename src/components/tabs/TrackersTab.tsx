@@ -1,4 +1,8 @@
 import { TorrentInfo } from "../../types";
+import { Badge } from "../ui/Badge";
+import { Button } from "../ui/Button";
+import { Plus, RefreshCw } from "lucide-react";
+import { cn } from "../../lib/utils";
 
 interface TrackersTabProps {
   torrent: TorrentInfo;
@@ -17,7 +21,7 @@ interface TrackerInfo {
 }
 
 export function TrackersTab({ torrent: _torrent }: TrackersTabProps) {
-  // Mock tracker data - will be replaced with real data in Phase 8C
+  // Mock tracker data
   const trackers: TrackerInfo[] = [
     {
       url: "udp://tracker.opentrackr.org:1337/announce",
@@ -54,121 +58,85 @@ export function TrackersTab({ torrent: _torrent }: TrackersTabProps) {
     },
   ];
 
-  const getStatusColor = (status: TrackerInfo["status"]) => {
+  const getStatusBadgeVariant = (status: TrackerInfo["status"]) => {
     switch (status) {
-      case "Working":
-        return "text-success";
-      case "Updating":
-        return "text-info";
-      case "Error":
-        return "text-error";
-      case "Disabled":
-        return "text-gray-500";
-      default:
-        return "text-gray-400";
-    }
-  };
-
-  const getStatusIcon = (status: TrackerInfo["status"]) => {
-    switch (status) {
-      case "Working":
-        return "✅";
-      case "Updating":
-        return "🔄";
-      case "Error":
-        return "❌";
-      case "Disabled":
-        return "⏸️";
-      default:
-        return "❓";
+      case "Working": return "success";
+      case "Updating": return "info";
+      case "Error": return "error";
+      case "Disabled": return "secondary";
+      default: return "secondary";
     }
   };
 
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="p-3 border-b border-dark-border flex items-center gap-2">
-        <button className="px-3 py-1.5 text-sm bg-primary hover:bg-primary-hover text-white rounded-md transition-colors">
-          Add Tracker
-        </button>
-        <button className="px-3 py-1.5 text-sm bg-dark-elevated hover:bg-dark-border text-gray-300 rounded-md transition-colors">
-          Force Announce
-        </button>
-        <div className="flex-1" />
-        <span className="text-sm text-gray-400">
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="primary" leftIcon={<Plus className="h-3.5 w-3.5" />}>
+            Add Tracker
+          </Button>
+          <Button size="sm" variant="secondary" leftIcon={<RefreshCw className="h-3.5 w-3.5" />}>
+            Force Announce
+          </Button>
+        </div>
+        <span className="text-xs text-text-tertiary font-medium px-2">
           {trackers.length} tracker{trackers.length !== 1 ? "s" : ""}
         </span>
       </div>
 
       {/* Trackers table */}
-      <div className="flex-1 overflow-auto custom-scrollbar">
-        {trackers.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-gray-400">
-            <div className="text-6xl mb-4">🌐</div>
-            <p className="text-lg font-medium">No trackers</p>
-            <p className="text-sm">Add a tracker to get started</p>
-          </div>
-        ) : (
-          <table className="w-full">
-            <thead className="bg-dark-secondary sticky top-0 z-10">
-              <tr className="text-xs text-gray-400 uppercase">
-                <th className="text-left p-3 font-semibold">Tracker URL</th>
-                <th className="text-center p-3 font-semibold w-32">Status</th>
-                <th className="text-center p-3 font-semibold w-24">Peers</th>
-                <th className="text-center p-3 font-semibold w-24">Seeds</th>
-                <th className="text-center p-3 font-semibold w-24">Leechers</th>
-                <th className="text-center p-3 font-semibold w-28">Downloaded</th>
-                <th className="text-center p-3 font-semibold w-32">Last Announce</th>
-                <th className="text-center p-3 font-semibold w-32">Next Announce</th>
+      <div className="bg-dark-surface-elevated border border-dark-border rounded-lg overflow-hidden flex-1">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-dark-bg/50 border-b border-dark-border text-xs uppercase text-text-tertiary font-medium">
+              <tr>
+                <th className="px-4 py-3">Tracker URL</th>
+                <th className="px-4 py-3 text-center w-24">Status</th>
+                <th className="px-4 py-3 text-center w-20">Peers</th>
+                <th className="px-4 py-3 text-center w-20">Seeds</th>
+                <th className="px-4 py-3 text-center w-20">Leech</th>
+                <th className="px-4 py-3 text-right w-32">Next Announce</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-dark-border">
               {trackers.map((tracker, index) => (
-                <tr
-                  key={index}
-                  className="border-b border-dark-border hover:bg-dark-elevated transition-colors text-sm"
-                >
-                  <td className="p-3">
+                <tr key={index} className="hover:bg-dark-surface-hover transition-colors group">
+                  <td className="px-4 py-3 min-w-[200px]">
                     <div className="flex flex-col">
-                      <span className="text-white font-mono text-xs break-all">
+                      <span className="text-text-primary font-mono text-xs truncate max-w-[300px]" title={tracker.url}>
                         {tracker.url}
                       </span>
-                      <span className="text-gray-500 text-xs mt-0.5">
+                      <span className={cn(
+                        "text-xs mt-0.5",
+                        tracker.status === "Error" ? "text-error" : "text-text-tertiary"
+                      )}>
                         {tracker.message}
                       </span>
                     </div>
                   </td>
-                  <td className="p-3 text-center">
-                    <div className="flex items-center justify-center gap-1">
-                      <span>{getStatusIcon(tracker.status)}</span>
-                      <span className={`font-medium ${getStatusColor(tracker.status)}`}>
-                        {tracker.status}
-                      </span>
-                    </div>
+                  <td className="px-4 py-3 text-center">
+                    <Badge variant={getStatusBadgeVariant(tracker.status)} className="w-full justify-center">
+                      {tracker.status}
+                    </Badge>
                   </td>
-                  <td className="p-3 text-center text-gray-300">
+                  <td className="px-4 py-3 text-center text-text-secondary">
                     {tracker.peers > 0 ? tracker.peers : "-"}
                   </td>
-                  <td className="p-3 text-center text-success">
+                  <td className="px-4 py-3 text-center text-success">
                     {tracker.seeds > 0 ? tracker.seeds : "-"}
                   </td>
-                  <td className="p-3 text-center text-primary">
+                  <td className="px-4 py-3 text-center text-primary">
                     {tracker.leechers > 0 ? tracker.leechers : "-"}
                   </td>
-                  <td className="p-3 text-center text-gray-300">
-                    {tracker.downloaded > 0 ? tracker.downloaded.toLocaleString() : "-"}
-                  </td>
-                  <td className="p-3 text-center text-gray-400 text-xs">
-                    {tracker.lastAnnounce}
-                  </td>
-                  <td className="p-3 text-center text-gray-400 text-xs">
+                  <td className="px-4 py-3 text-right text-text-tertiary font-mono text-xs">
                     {tracker.nextAnnounce}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        )}
+        </div>
       </div>
     </div>
   );

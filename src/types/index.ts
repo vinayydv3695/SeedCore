@@ -38,6 +38,24 @@ export interface Settings {
   enable_dht: boolean;
   enable_pex: boolean;
   dark_mode: boolean;
+  download_path: string;
+  // Auto-cleanup settings
+  cleanup_enabled: boolean;
+  cleanup_ratio: number;
+  cleanup_time: number;
+  cleanup_mode: string;
+  // Bandwidth scheduler settings
+  bandwidth_scheduler_enabled: boolean;
+  bandwidth_schedule: BandwidthRule[];
+}
+
+export interface BandwidthRule {
+  start_time: string;
+  end_time: string;
+  days: number[]; // 0=Sunday, 6=Saturday
+  download_limit: number;
+  upload_limit: number;
+  enabled: boolean;
 }
 
 export interface AppStats {
@@ -87,15 +105,21 @@ export interface PiecesInfo {
 }
 
 // File monitoring types
-export type FilePriority = "Skip" | "Low" | "Normal" | "High";
+export type FilePriority = "high" | "normal" | "low" | "skip"; // Updated to match AddTorrentModal lower case usage
 
 export interface FileInfo {
   path: string;
   size: number;
   downloaded: number;
-  priority: FilePriority;
+  priority: "Skip" | "Low" | "Normal" | "High"; // API uses Capitalized?
   is_folder: boolean;
 }
+
+// Note: FileInfo priority from API is capitalized "Skip" etc.
+// But AddTorrentModal uses lowercase "skip".
+// We might need to handle conversion.
+// For now, keeping FileInfo as per previous file content which had "Skip" etc.
+// But FilePriority type export I changed to lowercase to match AddTorrentModal usage in TorrentConfig.
 
 // Torrent metadata (before adding to client)
 export interface TorrentMetadata {
@@ -165,4 +189,29 @@ export interface DebridProgress {
   total_size: number;
   seeders: number | null;
   eta: number | null; // seconds
+}
+
+// Configuration types
+export type DownloadMode = "smart" | "cloud" | "p2p" | "hybrid";
+
+export interface FileSelection {
+  selected: boolean;
+  priority: FilePriority;
+}
+
+export interface TorrentConfig {
+  savePath: string;
+  useIncompletePath: boolean;
+  incompletePath?: string;
+  category: string;
+  tags: string[];
+  startImmediately: boolean;
+  addToQueue: boolean;
+  sequentialDownload: boolean;
+  downloadFirstLast: boolean;
+  skipHashCheck: boolean;
+  downloadMode: DownloadMode;
+  debridProvider?: string;
+  selectedFiles: number[];
+  filePriorities: { [index: number]: FilePriority };
 }

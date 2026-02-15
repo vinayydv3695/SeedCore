@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::torrent::Metainfo;
 use serde::{Deserialize, Serialize};
 use sled::Db;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Database keys
 const KEY_TORRENTS: &[u8] = b"torrents";
@@ -39,6 +39,8 @@ pub struct TorrentSession {
     pub last_activity: i64,
     /// Download source type (P2P, Debrid, or Hybrid)
     pub source: DownloadSource,
+    /// Time completed (Unix timestamp), None if not completed
+    pub completed_at: Option<i64>,
 }
 
 /// Debrid provider credentials stored encrypted in database
@@ -90,13 +92,43 @@ pub struct AppSettings {
     pub debrid_preference: Vec<DebridProviderType>,
     /// Smart mode: auto-select best source (cloud vs P2P)
     pub smart_mode_enabled: bool,
+    /// Auto-cleanup enabled
+    pub cleanup_enabled: bool,
+    /// Seeding ratio limit (0.0 = unlimited)
+    pub cleanup_ratio: f32,
+    /// Seeding time limit in seconds (0 = unlimited)
+    pub cleanup_time: u64,
+    /// Cleanup action: "Pause", "Remove", "Delete"
+    pub cleanup_mode: String,
+    /// Bandwidth scheduler enabled
+    pub bandwidth_scheduler_enabled: bool,
+    /// Bandwidth schedule rules
+    pub bandwidth_schedule: Vec<BandwidthRule>,
+}
+
+/// Bandwidth schedule rule
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandwidthRule {
+    /// Start time (HH:MM)
+    pub start_time: String,
+    /// End time (HH:MM)
+    pub end_time: String,
+    /// Days of week (0=Sunday, 6=Saturday)
+    pub days: Vec<u8>,
+    /// Download limit (bytes/sec, 0 = unlimited)
+    pub download_limit: u64,
+    /// Upload limit (bytes/sec, 0 = unlimited)
+    pub upload_limit: u64,
+    /// Whether rule is enabled
+    pub enabled: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             download_dir: dirs::download_dir()
-                .unwrap_or_else(|| std::env::current_dir().unwrap())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."))
                 .to_string_lossy()
                 .to_string(),
             max_download_speed: 0, // Unlimited
@@ -108,6 +140,12 @@ impl Default for AppSettings {
             enable_debrid: false,
             debrid_preference: vec![DebridProviderType::Torbox, DebridProviderType::RealDebrid],
             smart_mode_enabled: true,
+            cleanup_enabled: false,
+            cleanup_ratio: 2.0, // 200%
+            cleanup_time: 0,    // Unlimited
+            cleanup_mode: "Pause".to_string(),
+            bandwidth_scheduler_enabled: false,
+            bandwidth_schedule: Vec::new(),
         }
     }
 }
@@ -133,7 +171,7 @@ impl Database {
             .open_tree(KEY_TORRENTS)
             .map_err(|e| Error::IoError(format!("Failed to open torrents tree: {}", e)))?;
 
-        let data = bincode::serialize(session)
+        let data = serde_json::to_vec(session)
             .map_err(|e| Error::IoError(format!("Failed to serialize torrent: {}", e)))?;
 
         tree.insert(session.id.as_bytes(), data)
@@ -159,7 +197,7 @@ impl Database {
             .map_err(|e| Error::IoError(format!("Failed to load torrent: {}", e)))?
         {
             Some(data) => {
-                let session = bincode::deserialize(&data)
+                let session = serde_json::from_slice(&data)
                     .map_err(|e| Error::IoError(format!("Failed to deserialize torrent: {}", e)))?;
                 Ok(Some(session))
             }
@@ -180,7 +218,7 @@ impl Database {
             let (_, data) =
                 item.map_err(|e| Error::IoError(format!("Failed to iterate torrents: {}", e)))?;
 
-            let session = bincode::deserialize(&data)
+            let session = serde_json::from_slice(&data)
                 .map_err(|e| Error::IoError(format!("Failed to deserialize torrent: {}", e)))?;
 
             sessions.push(session);
@@ -243,7 +281,7 @@ impl Database {
             .open_tree(KEY_SETTINGS)
             .map_err(|e| Error::IoError(format!("Failed to open settings tree: {}", e)))?;
 
-        let data = bincode::serialize(settings)
+        let data = serde_json::to_vec(settings)
             .map_err(|e| Error::IoError(format!("Failed to serialize settings: {}", e)))?;
 
         tree.insert(b"app", data)
@@ -269,13 +307,36 @@ impl Database {
             .map_err(|e| Error::IoError(format!("Failed to load settings: {}", e)))?
         {
             Some(data) => {
-                let settings = bincode::deserialize(&data).map_err(|e| {
-                    Error::IoError(format!("Failed to deserialize settings: {}", e))
-                })?;
-                Ok(settings)
+                // Check if data is empty (corrupted database entry)
+                if data.is_empty() {
+                    tracing::warn!("Settings data is empty, returning defaults");
+                    let settings = AppSettings::default();
+                    self.save_settings(&settings)?;
+                    return Ok(settings);
+                }
+
+                // Try to deserialize, if it fails, reset to defaults
+                match serde_json::from_slice(&data) {
+                    Ok(settings) => Ok(settings),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to deserialize settings (data length: {}), resetting to defaults: {}",
+                            data.len(),
+                            e
+                        );
+                        // Corrupted data, delete and recreate
+                        tree.remove(b"app").map_err(|e| {
+                            Error::IoError(format!("Failed to remove corrupted settings: {}", e))
+                        })?;
+                        let settings = AppSettings::default();
+                        self.save_settings(&settings)?;
+                        Ok(settings)
+                    }
+                }
             }
             None => {
                 // Return default settings if none exist
+                tracing::info!("No settings found in database, creating defaults");
                 let settings = AppSettings::default();
                 self.save_settings(&settings)?;
                 Ok(settings)
@@ -308,7 +369,7 @@ impl Database {
             .open_tree(KEY_DEBRID_CREDENTIALS)
             .map_err(|e| Error::IoError(format!("Failed to open credentials tree: {}", e)))?;
 
-        let data = bincode::serialize(credentials)
+        let data = serde_json::to_vec(credentials)
             .map_err(|e| Error::IoError(format!("Failed to serialize credentials: {}", e)))?;
 
         let key = credentials.provider.as_str().as_bytes();
@@ -339,7 +400,7 @@ impl Database {
             .map_err(|e| Error::IoError(format!("Failed to load credentials: {}", e)))?
         {
             Some(data) => {
-                let credentials = bincode::deserialize(&data).map_err(|e| {
+                let credentials = serde_json::from_slice(&data).map_err(|e| {
                     Error::IoError(format!("Failed to deserialize credentials: {}", e))
                 })?;
                 Ok(Some(credentials))
@@ -361,7 +422,7 @@ impl Database {
             let (_, data) =
                 item.map_err(|e| Error::IoError(format!("Failed to iterate credentials: {}", e)))?;
 
-            let credentials = bincode::deserialize(&data)
+            let credentials = serde_json::from_slice(&data)
                 .map_err(|e| Error::IoError(format!("Failed to deserialize credentials: {}", e)))?;
 
             credentials_list.push(credentials);
@@ -397,7 +458,7 @@ impl Database {
             .open_tree(KEY_MASTER_PASSWORD)
             .map_err(|e| Error::IoError(format!("Failed to open master password tree: {}", e)))?;
 
-        let data = bincode::serialize(password_data)
+        let data = serde_json::to_vec(password_data)
             .map_err(|e| Error::IoError(format!("Failed to serialize master password: {}", e)))?;
 
         tree.insert(b"data", data)
@@ -423,7 +484,7 @@ impl Database {
             .map_err(|e| Error::IoError(format!("Failed to load master password: {}", e)))?
         {
             Some(data) => {
-                let password_data = bincode::deserialize(&data).map_err(|e| {
+                let password_data = serde_json::from_slice(&data).map_err(|e| {
                     Error::IoError(format!("Failed to deserialize master password: {}", e))
                 })?;
                 Ok(Some(password_data))
@@ -464,6 +525,55 @@ impl Database {
         tracing::warn!("Deleted master password and all debrid credentials");
         Ok(())
     }
+
+    /// Flush all pending writes to disk
+    pub fn flush(&self) -> Result<()> {
+        self.db
+            .flush()
+            .map_err(|e| Error::IoError(format!("Failed to flush database: {}", e)))?;
+        Ok(())
+    }
+
+    /// Dump all data to JSON string for backup
+    pub fn dump_all(&self) -> Result<String> {
+        let settings = self.load_settings()?;
+        let torrents = self.load_all_torrents()?;
+
+        let backup = BackupData {
+            version: 1,
+            timestamp: chrono::Utc::now().timestamp(),
+            settings,
+            torrents,
+        };
+
+        serde_json::to_string(&backup).map_err(|e| Error::DatabaseError(e.to_string()))
+    }
+
+    /// Restore data from JSON string
+    /// Warning: This overwrites existing settings and torrents (upsert)
+    pub fn restore(&self, json: &str) -> Result<()> {
+        let backup: BackupData =
+            serde_json::from_str(json).map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+        // Restore settings
+        self.save_settings(&backup.settings)?;
+
+        // Restore torrents (upsert)
+        for torrent in backup.torrents {
+            self.save_torrent(&torrent)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Backup data structure
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupData {
+    pub version: u32,
+    pub timestamp: i64,
+    pub settings: AppSettings,
+    pub torrents: Vec<TorrentSession>,
 }
 
 #[derive(Debug, Clone)]
@@ -525,11 +635,15 @@ mod tests {
             added_at: 1234567890,
             last_activity: 1234567890,
             source: DownloadSource::P2P,
+            completed_at: None,
         };
 
         db.save_torrent(&session).unwrap();
 
-        let loaded = db.load_torrent("test123").unwrap().unwrap();
+        let loaded = db
+            .load_torrent("test123")
+            .unwrap()
+            .expect("Torrent should exist");
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.downloaded, session.downloaded);
         assert_eq!(loaded.state, session.state);
@@ -552,6 +666,7 @@ mod tests {
             added_at: 1234567890,
             last_activity: 1234567890,
             source: DownloadSource::P2P,
+            completed_at: Some(1234567990),
         };
 
         let session2 = TorrentSession {
@@ -592,6 +707,7 @@ mod tests {
             added_at: 1234567890,
             last_activity: 1234567890,
             source: DownloadSource::P2P,
+            completed_at: None,
         };
 
         db.save_torrent(&session).unwrap();
@@ -618,6 +734,7 @@ mod tests {
             added_at: 1234567890,
             last_activity: 1234567890,
             source: DownloadSource::P2P,
+            completed_at: None,
         };
 
         db.save_torrent(&session).unwrap();

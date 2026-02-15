@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{sleep, Duration};
+use tokio_util::sync::CancellationToken;
 
 /// Polling interval for checking debrid download status (in seconds)
 const POLL_INTERVAL: u64 = 10;
@@ -29,7 +30,10 @@ impl CloudDownloadManager {
     pub fn new(debrid_manager: Arc<RwLock<DebridManager>>) -> Self {
         Self {
             debrid_manager,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to create HTTP client"),
         }
     }
 
@@ -157,9 +161,10 @@ impl CloudDownloadManager {
         debrid_torrent_id: String,
         provider: DebridProviderType,
         save_path: PathBuf,
-        torrents: Arc<std::sync::RwLock<std::collections::HashMap<String, crate::state::TorrentInfo>>>,
+        torrents: Arc<RwLock<std::collections::HashMap<String, crate::state::TorrentInfo>>>,
         debrid_manager: Arc<RwLock<DebridManager>>,
-        file_progress: Arc<std::sync::RwLock<std::collections::HashMap<String, std::collections::HashMap<String, crate::state::CloudFileProgress>>>>,
+        file_progress: Arc<RwLock<std::collections::HashMap<String, std::collections::HashMap<String, crate::state::CloudFileProgress>>>>,
+        cancel_token: CancellationToken,
     ) {
         let info_hash_clone = info_hash.clone();
         let debrid_torrent_id_clone = debrid_torrent_id.clone();
@@ -173,6 +178,12 @@ impl CloudDownloadManager {
 
             // Poll until torrent is ready to download
             let files = loop {
+                // Check cancellation before each poll
+                if cancel_token.is_cancelled() {
+                    tracing::info!("Cloud download task cancelled for {}", info_hash_clone);
+                    return;
+                }
+
                 tracing::debug!("Polling debrid service for torrent {}", debrid_torrent_id_clone);
                 
                 let manager = debrid_manager.read().await;
@@ -188,10 +199,10 @@ impl CloudDownloadManager {
                         );
                         
                         // Update torrent progress in UI
-                        if let Ok(mut torrent_map) = torrents.write() {
+                        {
+                            let mut torrent_map = torrents.write().await;
                             if let Some(torrent) = torrent_map.get_mut(&info_hash_clone) {
                                 torrent.size = progress.total_size;
-                                // Don't update downloaded here - we'll track that during file download
                             }
                         }
                         
@@ -204,10 +215,9 @@ impl CloudDownloadManager {
                                 tracing::error!("Failed to select files: {}", e);
                                 
                                 // Update torrent state to error
-                                if let Ok(mut torrent_map) = torrents.write() {
-                                    if let Some(torrent) = torrent_map.get_mut(&info_hash_clone) {
-                                        torrent.state = TorrentState::Error;
-                                    }
+                                let mut torrent_map = torrents.write().await;
+                                if let Some(torrent) = torrent_map.get_mut(&info_hash_clone) {
+                                    torrent.state = TorrentState::Error;
                                 }
                                 return;
                             }
@@ -245,24 +255,30 @@ impl CloudDownloadManager {
                         tracing::error!("Error getting torrent progress: {}", e);
                         
                         // Update torrent state to error
-                        if let Ok(mut torrent_map) = torrents.write() {
-                            if let Some(torrent) = torrent_map.get_mut(&info_hash_clone) {
-                                torrent.state = TorrentState::Error;
-                            }
+                        let mut torrent_map = torrents.write().await;
+                        if let Some(torrent) = torrent_map.get_mut(&info_hash_clone) {
+                            torrent.state = TorrentState::Error;
                         }
                         return;
                     }
                 }
                 
-                // Wait before polling again
-                sleep(Duration::from_secs(POLL_INTERVAL)).await;
+                // Wait before polling again, but check for cancellation
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(POLL_INTERVAL)) => {}
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("Cloud download task cancelled during polling for {}", info_hash_clone);
+                        return;
+                    }
+                }
             };
 
             // Calculate total size
             let total_size: u64 = files.iter().map(|f| f.size).sum();
             
             // Initialize file progress for all files
-            if let Ok(mut progress_map) = file_progress.write() {
+            {
+                let mut progress_map = file_progress.write().await;
                 let mut file_map = std::collections::HashMap::new();
                 for file in &files {
                     file_map.insert(file.name.clone(), crate::state::CloudFileProgress {
@@ -277,10 +293,10 @@ impl CloudDownloadManager {
             }
             
             // Update torrent info with total size
-            if let Ok(mut torrent_map) = torrents.write() {
+            {
+                let mut torrent_map = torrents.write().await;
                 if let Some(torrent) = torrent_map.get_mut(&info_hash_clone) {
                     torrent.size = total_size;
-                    // Use the first file's name as the torrent name
                     if let Some(first_file) = files.first() {
                         torrent.name = first_file.name.clone();
                     }
@@ -288,12 +304,16 @@ impl CloudDownloadManager {
             }
 
             // Download each file
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))  // 5 min for large file downloads
+                .build()
+                .expect("Failed to create HTTP client");
             let mut total_downloaded: u64 = 0;
 
             for file in files {
                 // Mark file as downloading
-                if let Ok(mut progress_map) = file_progress.write() {
+                {
+                    let mut progress_map = file_progress.write().await;
                     if let Some(file_map) = progress_map.get_mut(&info_hash_clone) {
                         if let Some(progress) = file_map.get_mut(&file.name) {
                             progress.state = crate::state::CloudFileState::Downloading;
@@ -312,11 +332,10 @@ impl CloudDownloadManager {
                         tracing::error!("No download URL for file: {}", file.name);
                         
                         // Mark file as error
-                        if let Ok(mut progress_map) = file_progress.write() {
-                            if let Some(file_map) = progress_map.get_mut(&info_hash_clone) {
-                                if let Some(progress) = file_map.get_mut(&file.name) {
-                                    progress.state = crate::state::CloudFileState::Error;
-                                }
+                        let mut progress_map = file_progress.write().await;
+                        if let Some(file_map) = progress_map.get_mut(&info_hash_clone) {
+                            if let Some(progress) = file_map.get_mut(&file.name) {
+                                progress.state = crate::state::CloudFileState::Error;
                             }
                         }
                         continue;
@@ -329,11 +348,10 @@ impl CloudDownloadManager {
                         tracing::error!("Failed to create directory {:?}: {}", parent, e);
                         
                         // Mark file as error
-                        if let Ok(mut progress_map) = file_progress.write() {
-                            if let Some(file_map) = progress_map.get_mut(&info_hash_clone) {
-                                if let Some(progress) = file_map.get_mut(&file.name) {
-                                    progress.state = crate::state::CloudFileState::Error;
-                                }
+                        let mut progress_map = file_progress.write().await;
+                        if let Some(file_map) = progress_map.get_mut(&info_hash_clone) {
+                            if let Some(progress) = file_map.get_mut(&file.name) {
+                                progress.state = crate::state::CloudFileState::Error;
                             }
                         }
                         continue;
@@ -356,12 +374,11 @@ impl CloudDownloadManager {
                         tracing::info!("Successfully downloaded: {}", file.name);
                         
                         // Mark file as complete
-                        if let Ok(mut progress_map) = file_progress.write() {
-                            if let Some(file_map) = progress_map.get_mut(&info_hash_clone) {
-                                if let Some(progress) = file_map.get_mut(&file.name) {
-                                    progress.state = crate::state::CloudFileState::Complete;
-                                    progress.downloaded = file.size;
-                                }
+                        let mut progress_map = file_progress.write().await;
+                        if let Some(file_map) = progress_map.get_mut(&info_hash_clone) {
+                            if let Some(progress) = file_map.get_mut(&file.name) {
+                                progress.state = crate::state::CloudFileState::Complete;
+                                progress.downloaded = file.size;
                             }
                         }
                     }
@@ -369,11 +386,10 @@ impl CloudDownloadManager {
                         tracing::error!("Failed to download {}: {}", file.name, e);
                         
                         // Mark file as error
-                        if let Ok(mut progress_map) = file_progress.write() {
-                            if let Some(file_map) = progress_map.get_mut(&info_hash_clone) {
-                                if let Some(progress) = file_map.get_mut(&file.name) {
-                                    progress.state = crate::state::CloudFileState::Error;
-                                }
+                        let mut progress_map = file_progress.write().await;
+                        if let Some(file_map) = progress_map.get_mut(&info_hash_clone) {
+                            if let Some(progress) = file_map.get_mut(&file.name) {
+                                progress.state = crate::state::CloudFileState::Error;
                             }
                         }
                     }
@@ -381,7 +397,8 @@ impl CloudDownloadManager {
             }
 
             // Mark torrent as complete
-            if let Ok(mut torrent_map) = torrents.write() {
+            {
+                let mut torrent_map = torrents.write().await;
                 if let Some(torrent) = torrent_map.get_mut(&info_hash_clone) {
                     torrent.state = TorrentState::Seeding;
                     torrent.downloaded = total_size;
@@ -400,9 +417,9 @@ async fn download_file_with_state_update(
     destination: &PathBuf,
     info_hash: &str,
     file_name: &str,
-    file_size: u64,
-    torrents: &Arc<std::sync::RwLock<std::collections::HashMap<String, crate::state::TorrentInfo>>>,
-    file_progress: &Arc<std::sync::RwLock<std::collections::HashMap<String, std::collections::HashMap<String, crate::state::CloudFileProgress>>>>,
+    _file_size: u64,
+    torrents: &Arc<RwLock<std::collections::HashMap<String, crate::state::TorrentInfo>>>,
+    file_progress: &Arc<RwLock<std::collections::HashMap<String, std::collections::HashMap<String, crate::state::CloudFileProgress>>>>,
     total_downloaded: &mut u64,
 ) -> Result<()> {
     let response = client.get(url).send().await?;
@@ -441,7 +458,8 @@ async fn download_file_with_state_update(
             };
             
             // Update file progress
-            if let Ok(mut progress_map) = file_progress.write() {
+            {
+                let mut progress_map = file_progress.write().await;
                 if let Some(file_map) = progress_map.get_mut(info_hash) {
                     if let Some(progress) = file_map.get_mut(file_name) {
                         progress.downloaded = downloaded;
@@ -451,7 +469,8 @@ async fn download_file_with_state_update(
             }
             
             // Update torrent progress
-            if let Ok(mut torrent_map) = torrents.write() {
+            {
+                let mut torrent_map = torrents.write().await;
                 if let Some(torrent) = torrent_map.get_mut(info_hash) {
                     torrent.downloaded = *total_downloaded;
                     torrent.download_speed = speed;
@@ -466,7 +485,8 @@ async fn download_file_with_state_update(
     file.flush().await?;
     
     // Final state update
-    if let Ok(mut progress_map) = file_progress.write() {
+    {
+        let mut progress_map = file_progress.write().await;
         if let Some(file_map) = progress_map.get_mut(info_hash) {
             if let Some(progress) = file_map.get_mut(file_name) {
                 progress.downloaded = downloaded;
@@ -475,7 +495,8 @@ async fn download_file_with_state_update(
         }
     }
     
-    if let Ok(mut torrent_map) = torrents.write() {
+    {
+        let mut torrent_map = torrents.write().await;
         if let Some(torrent) = torrent_map.get_mut(info_hash) {
             torrent.downloaded = *total_downloaded;
         }

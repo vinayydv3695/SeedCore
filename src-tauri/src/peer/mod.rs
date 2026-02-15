@@ -84,9 +84,14 @@ impl PeerConnection {
     
     /// Connect to a peer
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
-        let stream = TcpStream::connect(addr)
-            .await
-            .map_err(|e| crate::error::Error::NetworkError(format!("Failed to connect: {}", e)))?;
+        // Add 10 second timeout for connection
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            TcpStream::connect(addr)
+        )
+        .await
+        .map_err(|_| crate::error::Error::NetworkError(format!("Connection to {} timed out", addr)))?
+        .map_err(|e| crate::error::Error::NetworkError(format!("Failed to connect: {}", e)))?;
         
         Ok(Self::new(stream, addr))
     }
@@ -97,36 +102,44 @@ impl PeerConnection {
         info_hash: [u8; 20],
         our_peer_id: [u8; 20],
     ) -> Result<Handshake> {
-        // Send our handshake
-        let our_handshake = Handshake::new(info_hash, our_peer_id);
-        let handshake_bytes = our_handshake.to_bytes();
-        
-        self.stream.write_all(&handshake_bytes)
-            .await
-            .map_err(|e| crate::error::Error::NetworkError(format!("Failed to send handshake: {}", e)))?;
-        
-        tracing::debug!("Sent handshake to {}", self.addr);
-        
-        // Read peer's handshake
-        let mut buf = vec![0u8; 68]; // Handshake is 68 bytes
-        self.stream.read_exact(&mut buf)
-            .await
-            .map_err(|e| crate::error::Error::NetworkError(format!("Failed to read handshake: {}", e)))?;
-        
-        let peer_handshake = Handshake::from_bytes(&buf)?;
-        
-        // Verify info hash matches
-        if peer_handshake.info_hash != info_hash {
-            return Err(crate::error::Error::NetworkError(
-                "Info hash mismatch".to_string()
-            ));
-        }
-        
-        self.peer_id = Some(peer_handshake.peer_id);
-        
-        tracing::debug!("Received handshake from {}", self.addr);
-        
-        Ok(peer_handshake)
+        // Add 10 second timeout for entire handshake
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async {
+                // Send our handshake
+                let our_handshake = Handshake::new(info_hash, our_peer_id);
+                let handshake_bytes = our_handshake.to_bytes();
+                
+                self.stream.write_all(&handshake_bytes)
+                    .await
+                    .map_err(|e| crate::error::Error::NetworkError(format!("Failed to send handshake: {}", e)))?;
+                
+                tracing::debug!("Sent handshake to {}", self.addr);
+                
+                // Read peer's handshake
+                let mut buf = vec![0u8; 68]; // Handshake is 68 bytes
+                self.stream.read_exact(&mut buf)
+                    .await
+                    .map_err(|e| crate::error::Error::NetworkError(format!("Failed to read handshake: {}", e)))?;
+                
+                let peer_handshake = Handshake::from_bytes(&buf)?;
+                
+                // Verify info hash matches
+                if peer_handshake.info_hash != info_hash {
+                    return Err(crate::error::Error::NetworkError(
+                        "Info hash mismatch".to_string()
+                    ));
+                }
+                
+                self.peer_id = Some(peer_handshake.peer_id);
+                
+                tracing::debug!("Received handshake from {}", self.addr);
+                
+                Ok(peer_handshake)
+            }
+        )
+        .await
+        .map_err(|_| crate::error::Error::NetworkError(format!("Handshake with {} timed out", self.addr)))?
     }
     
     /// Send a message to the peer
@@ -142,26 +155,42 @@ impl PeerConnection {
     
     /// Receive a message from the peer
     pub async fn recv_message(&mut self) -> Result<Message> {
-        // Read message length (4 bytes, big-endian)
-        let mut len_buf = [0u8; 4];
-        self.stream.read_exact(&mut len_buf)
-            .await
-            .map_err(|e| crate::error::Error::NetworkError(format!("Failed to read message length: {}", e)))?;
-        
-        let length = u32::from_be_bytes(len_buf);
-        
-        // Handle keep-alive (length = 0)
-        if length == 0 {
-            return Ok(Message::KeepAlive);
-        }
-        
-        // Read message payload
-        let mut payload = vec![0u8; length as usize];
-        self.stream.read_exact(&mut payload)
-            .await
-            .map_err(|e| crate::error::Error::NetworkError(format!("Failed to read message payload: {}", e)))?;
-        
-        Message::from_bytes(&payload)
+        // Add 60 second timeout for receiving messages
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            async {
+                // Read message length (4 bytes, big-endian)
+                let mut len_buf = [0u8; 4];
+                self.stream.read_exact(&mut len_buf)
+                    .await
+                    .map_err(|e| crate::error::Error::NetworkError(format!("Failed to read message length: {}", e)))?;
+                
+                let length = u32::from_be_bytes(len_buf);
+                
+                // Protect against malicious peers sending huge messages
+                const MAX_MESSAGE_SIZE: u32 = 128 * 1024 * 1024; // 128MB (large piece)
+                if length > MAX_MESSAGE_SIZE {
+                    return Err(crate::error::Error::InvalidData(
+                        format!("Message too large: {} bytes (max: {} bytes)", length, MAX_MESSAGE_SIZE)
+                    ));
+                }
+                
+                // Handle keep-alive (length = 0)
+                if length == 0 {
+                    return Ok(Message::KeepAlive);
+                }
+                
+                // Read message payload
+                let mut payload = vec![0u8; length as usize];
+                self.stream.read_exact(&mut payload)
+                    .await
+                    .map_err(|e| crate::error::Error::NetworkError(format!("Failed to read message payload: {}", e)))?;
+                
+                Message::from_bytes(&payload)
+            }
+        )
+        .await
+        .map_err(|_| crate::error::Error::NetworkError(format!("Message receive from {} timed out", self.addr)))?
     }
     
     /// Send keep-alive message

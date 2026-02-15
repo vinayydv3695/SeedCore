@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
 /// Maximum number of concurrent block requests per peer
 const MAX_PENDING_REQUESTS: usize = 5;
@@ -40,6 +41,14 @@ struct PeerSession {
     /// Download statistics
     downloaded_bytes: u64,
     uploaded_bytes: u64,
+    /// Download speed (bytes/sec)
+    download_speed: f64,
+    /// Upload speed (bytes/sec)
+    upload_speed: f64,
+    /// Bytes downloaded at last stats update
+    last_downloaded_bytes: u64,
+    /// Bytes uploaded at last stats update
+    last_uploaded_bytes: u64,
 }
 
 impl PeerSession {
@@ -51,6 +60,10 @@ impl PeerSession {
             peer_bitfield: None,
             downloaded_bytes: 0,
             uploaded_bytes: 0,
+            download_speed: 0.0,
+            upload_speed: 0.0,
+            last_downloaded_bytes: 0,
+            last_uploaded_bytes: 0,
         }
     }
 
@@ -97,6 +110,10 @@ pub enum PeerManagerCommand {
     GetPeerList(oneshot::Sender<Vec<crate::peer::PeerInfo>>),
     /// Broadcast that we have a piece
     BroadcastHave(usize),
+    /// Pause peer manager (stop requesting blocks)
+    Pause,
+    /// Resume peer manager
+    Resume,
 }
 
 /// Peer manager statistics
@@ -122,11 +139,15 @@ pub struct PeerManager {
     /// Disk manager (shared with engine)
     disk_manager: Arc<RwLock<DiskManager>>,
     /// Command receiver
-    command_rx: mpsc::UnboundedReceiver<PeerManagerCommand>,
+    command_rx: mpsc::Receiver<PeerManagerCommand>,
     /// Command sender (for cloning)
-    command_tx: mpsc::UnboundedSender<PeerManagerCommand>,
+    command_tx: mpsc::Sender<PeerManagerCommand>,
     /// Statistics
     stats: Arc<RwLock<PeerManagerStats>>,
+    /// Cancellation token for cooperative shutdown
+    cancel_token: CancellationToken,
+    /// Paused state
+    paused: bool,
 }
 
 impl PeerManager {
@@ -136,8 +157,9 @@ impl PeerManager {
         peer_id: [u8; 20],
         piece_manager: Arc<RwLock<PieceManager>>,
         disk_manager: Arc<RwLock<DiskManager>>,
+        cancel_token: CancellationToken,
     ) -> Self {
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::channel(100);
         let stats = PeerManagerStats {
             connected_peers: 0,
             total_downloaded: 0,
@@ -155,11 +177,13 @@ impl PeerManager {
             command_rx,
             command_tx,
             stats: Arc::new(RwLock::new(stats)),
+            cancel_token,
+            paused: false,
         }
     }
 
     /// Get command sender
-    pub fn command_sender(&self) -> mpsc::UnboundedSender<PeerManagerCommand> {
+    pub fn command_sender(&self) -> mpsc::Sender<PeerManagerCommand> {
         self.command_tx.clone()
     }
 
@@ -172,11 +196,21 @@ impl PeerManager {
 
         loop {
             tokio::select! {
+                biased;
+
+                // Cooperative cancellation — highest priority
+                _ = self.cancel_token.cancelled() => {
+                    tracing::info!("PeerManager received cancellation signal, shutting down");
+                    break;
+                }
+
                 // Handle commands
                 Some(cmd) = self.command_rx.recv() => {
                     match cmd {
                         PeerManagerCommand::AddPeer(addr) => {
-                            self.connect_to_peer(addr).await;
+                            if !self.paused {
+                                self.connect_to_peer(addr).await;
+                            }
                         }
                         PeerManagerCommand::RemovePeer(addr) => {
                             self.sessions.write().await.remove(&addr);
@@ -190,15 +224,28 @@ impl PeerManager {
                             let _ = tx.send(peer_list);
                         }
                         PeerManagerCommand::BroadcastHave(piece_index) => {
+                            // Can still broadcast haves while paused? Probably yes, to keep state in sync
                             self.broadcast_have(piece_index).await;
+                        }
+                        PeerManagerCommand::Pause => {
+                            tracing::info!("PeerManager paused");
+                            self.paused = true;
+                            // Optionally disconnect peers or just stop requesting?
+                            // For now, let's just stop requesting and processing new connections
+                        }
+                        PeerManagerCommand::Resume => {
+                            tracing::info!("PeerManager resumed");
+                            self.paused = false;
                         }
                     }
                 }
 
                 // Periodic tasks
                 _ = tick_interval.tick() => {
-                    self.handle_pending_requests().await;
-                    self.update_stats().await;
+                    if !self.paused {
+                        self.handle_pending_requests().await;
+                    }
+                    self.update_stats().await; // Always update stats
                 }
 
                 // Send keep-alive messages
@@ -208,15 +255,24 @@ impl PeerManager {
 
                 // Choking algorithm
                 _ = choking_interval.tick() => {
-                    self.update_choking().await;
+                    if !self.paused {
+                        self.update_choking().await;
+                    }
                 }
 
                 // Optimistic unchoke
                 _ = optimistic_interval.tick() => {
-                    self.optimistic_unchoke().await;
+                    if !self.paused {
+                        self.optimistic_unchoke().await;
+                    }
                 }
             }
         }
+
+        // Clean up: disconnect all peers
+        let mut sessions = self.sessions.write().await;
+        tracing::info!("PeerManager shutting down, disconnecting {} peers", sessions.len());
+        sessions.clear();
     }
 
     /// Connect to a peer and start download loop
@@ -245,6 +301,22 @@ impl PeerManager {
         }
 
         tracing::info!("Handshake successful with {}", addr);
+
+        // CRITICAL FIX: Send our bitfield immediately after handshake
+        // This tells the peer what pieces we have
+        let our_bitfield = {
+            let pm = self.piece_manager.read().await;
+            pm.our_bitfield().as_bytes().to_vec()
+        };
+        
+        if let Err(e) = session.connection.send_message(&Message::Bitfield {
+            bitfield: our_bitfield
+        }).await {
+            tracing::warn!("Failed to send bitfield to {}: {}", addr, e);
+            return;
+        }
+        
+        tracing::debug!("Sent our bitfield to {}", addr);
 
         // Store session
         let sessions = self.sessions.clone();
@@ -280,25 +352,39 @@ impl PeerManager {
         peer_id: String,
     ) -> Result<(), String> {
         loop {
-            // Get session
-            let mut sessions_lock = sessions.write().await;
-            let session = sessions_lock
-                .get_mut(&addr)
-                .ok_or_else(|| "Session not found".to_string())?;
-
-            // Receive message
+            // CRITICAL FIX: Extract connection from sessions to avoid holding lock during I/O
+            // We temporarily remove the session, do I/O, then re-insert it
+            
+            // Step 1: Extract the entire session (including connection)
+            let mut session = {
+                let mut sessions_guard = sessions.write().await;
+                match sessions_guard.remove(&addr) {
+                    None => return Err("Session not found".to_string()),
+                    Some(s) => s,
+                }
+            };
+            // Lock is now released - other peers can proceed
+            
+            // Step 2: Do network I/O without holding any lock
             let message = match session.connection.recv_message().await {
-                Ok(msg) => msg,
+                Ok(msg) => {
+                    session.last_activity = Instant::now();
+                    msg
+                },
                 Err(e) => {
-                    drop(sessions_lock);
-                    sessions.write().await.remove(&addr);
+                    // Don't re-insert session on error - just exit
                     return Err(format!("Failed to receive message: {}", e));
                 }
             };
+            
+            // Step 3: Re-insert session before processing message
+            {
+                let mut sessions_guard = sessions.write().await;
+                sessions_guard.insert(addr, session);
+            }
+            // Lock released again
 
-            session.last_activity = Instant::now();
-
-            // Handle message
+            // Step 4: Handle message (may need to update session state)
             match message {
                 Message::KeepAlive => {
                     tracing::debug!("Received keep-alive from {}", addr);
@@ -306,34 +392,50 @@ impl PeerManager {
 
                 Message::Choke => {
                     tracing::debug!("Choked by {}", addr);
-                    session.connection.peer_choking = true;
+                    let mut sessions_guard = sessions.write().await;
+                    if let Some(session) = sessions_guard.get_mut(&addr) {
+                        session.connection.peer_choking = true;
+                    }
                 }
 
                 Message::Unchoke => {
                     tracing::info!("Unchoked by {}", addr);
-                    session.connection.peer_choking = false;
+                    {
+                        let mut sessions_guard = sessions.write().await;
+                        if let Some(session) = sessions_guard.get_mut(&addr) {
+                            session.connection.peer_choking = false;
+                        }
+                    }
 
                     // Start requesting pieces
-                    drop(sessions_lock);
                     Self::request_pieces(addr, sessions.clone(), piece_manager.clone(), &peer_id)
                         .await?;
                     continue;
                 }
 
                 Message::Interested => {
-                    session.connection.peer_interested = true;
+                    let mut sessions_guard = sessions.write().await;
+                    if let Some(session) = sessions_guard.get_mut(&addr) {
+                        session.connection.peer_interested = true;
+                    }
                 }
 
                 Message::NotInterested => {
-                    session.connection.peer_interested = false;
+                    let mut sessions_guard = sessions.write().await;
+                    if let Some(session) = sessions_guard.get_mut(&addr) {
+                        session.connection.peer_interested = false;
+                    }
                 }
 
                 Message::Have { piece_index } => {
                     tracing::debug!("Peer {} has piece {}", addr, piece_index);
                     piece_manager.write().await.peer_has_piece(piece_index as usize);
 
-                    if let Some(ref mut bitfield) = session.peer_bitfield {
-                        bitfield.set_piece(piece_index as usize);
+                    let mut sessions_guard = sessions.write().await;
+                    if let Some(session) = sessions_guard.get_mut(&addr) {
+                        if let Some(ref mut bitfield) = session.peer_bitfield {
+                            bitfield.set_piece(piece_index as usize);
+                        }
                     }
                 }
 
@@ -345,15 +447,34 @@ impl PeerManager {
                     
                     // Add peer to piece manager
                     piece_manager.write().await.add_peer(peer_id.clone(), &peer_bf);
-                    session.peer_bitfield = Some(peer_bf);
-
+                    
                     // Send interested if they have pieces we need
                     let our_bf = piece_manager.read().await.our_bitfield().clone();
-                    if !our_bf.pieces_to_request(session.peer_bitfield.as_ref().unwrap()).is_empty() {
+                    let pieces_we_need = our_bf.pieces_to_request(&peer_bf);
+                    
+                    // Update session and send interested message
+                    let send_interested = !pieces_we_need.is_empty();
+                    {
+                        let mut sessions_guard = sessions.write().await;
+                        if let Some(session) = sessions_guard.get_mut(&addr) {
+                            session.peer_bitfield = Some(peer_bf.clone());
+                        }
+                    }
+                    
+                    if send_interested {
+                        tracing::info!("Peer {} has {} pieces we need, sending interested", addr, pieces_we_need.len());
+                        
+                        // Extract connection again to send message
+                        let mut session = sessions.write().await.remove(&addr)
+                            .ok_or_else(|| "Session not found".to_string())?;
+                        
                         if let Err(e) = session.connection.send_interested().await {
-                            drop(sessions_lock);
                             return Err(format!("Failed to send interested: {}", e));
                         }
+                        
+                        sessions.write().await.insert(addr, session);
+                    } else {
+                        tracing::debug!("Peer {} has no pieces we need", addr);
                     }
                 }
 
@@ -364,7 +485,14 @@ impl PeerManager {
                     );
 
                     // Check if we're choking this peer
-                    if session.connection.am_choking {
+                    let am_choking = {
+                        let sessions_guard = sessions.read().await;
+                        sessions_guard.get(&addr)
+                            .map(|s| s.connection.am_choking)
+                            .unwrap_or(true)
+                    };
+                    
+                    if am_choking {
                         tracing::debug!("Ignoring request from {} (we are choking them)", addr);
                         continue;
                     }
@@ -383,8 +511,7 @@ impl PeerManager {
                         continue;
                     }
 
-                    // Read the piece data from disk
-                    drop(sessions_lock);
+                    // Read the piece data from disk and send
                     if let Err(e) = Self::handle_upload_request(
                         addr,
                         sessions.clone(),
@@ -407,14 +534,24 @@ impl PeerManager {
                 } => {
                     let block = BlockInfo::new(index as usize, begin as usize, data.len());
                     
-                    // Mark request as complete
-                    let was_pending = session.remove_pending_request(&block);
+                    // Mark request as complete and update stats
+                    let (was_pending, can_request) = {
+                        let mut sessions_guard = sessions.write().await;
+                        if let Some(session) = sessions_guard.get_mut(&addr) {
+                            let was_pending = session.remove_pending_request(&block);
+                            if was_pending {
+                                session.downloaded_bytes += data.len() as u64;
+                            }
+                            (was_pending, session.can_request())
+                        } else {
+                            (false, false)
+                        }
+                    };
+                    
                     if !was_pending {
                         tracing::warn!("Received unrequested block from {}", addr);
                         continue;
                     }
-
-                    session.downloaded_bytes += data.len() as u64;
 
                     tracing::debug!(
                         "Received piece {} offset {} ({} bytes) from {}",
@@ -430,7 +567,7 @@ impl PeerManager {
                         Ok(is_complete) => {
                             if is_complete {
                                 // Piece is complete - verify and write to disk
-                                drop(sessions_lock);
+                                drop(pm);
                                 Self::handle_piece_complete(
                                     index as usize,
                                     piece_manager.clone(),
@@ -448,8 +585,7 @@ impl PeerManager {
                     drop(pm);
 
                     // Request more pieces if we can
-                    if session.can_request() {
-                        drop(sessions_lock);
+                    if can_request {
                         Self::request_pieces(addr, sessions.clone(), piece_manager.clone(), &peer_id)
                             .await?;
                         continue;
@@ -460,8 +596,6 @@ impl PeerManager {
                     tracing::debug!("Received cancel from {}", addr);
                 }
             }
-
-            drop(sessions_lock);
         }
     }
 
@@ -647,20 +781,30 @@ impl PeerManager {
     }
 
     /// Handle timed-out requests
+    /// Handle timed-out block requests
+    /// Removes timed-out blocks from pending and marks them for re-request
     async fn handle_pending_requests(&self) {
         let mut sessions = self.sessions.write().await;
 
         for (addr, session) in sessions.iter_mut() {
             let timed_out = session.get_timed_out_requests();
             
-            for block in timed_out {
+            for block in &timed_out {
                 tracing::warn!(
-                    "Request timed out for piece {} offset {} from {}",
+                    "Request timed out for piece {} offset {} from {}, will re-request",
                     block.piece_index,
                     block.offset,
                     addr
                 );
-                session.remove_pending_request(&block);
+                session.remove_pending_request(block);
+                
+                // Mark block as failed in piece manager so it can be re-requested
+                // This ensures the block will be picked up again by request_pieces
+                let mut pm = self.piece_manager.write().await;
+                if let Err(e) = pm.mark_block_failed(*block) {
+                    tracing::debug!("Could not mark block as failed (piece may be complete): {}", e);
+                }
+                drop(pm);
             }
         }
     }
@@ -681,15 +825,42 @@ impl PeerManager {
     }
 
     /// Update statistics
-    async fn update_stats(&self) {
-        let sessions = self.sessions.read().await;
+    /// Update statistics
+    async fn update_stats(&mut self) { // Changed to mutable self to be explicit, though we use interior mutability
+        // We need write lock on sessions to update per-session stats
+        let mut sessions = self.sessions.write().await;
+        let mut connected_peers = 0;
+        let mut total_downloaded = 0;
+        let mut total_uploaded = 0;
+        let mut download_speed = 0.0;
+        let mut upload_speed = 0.0;
+        
+        // Update per-peer stats
+        for session in sessions.values_mut() {
+            connected_peers += 1;
+            total_downloaded += session.downloaded_bytes;
+            total_uploaded += session.uploaded_bytes;
+            
+            // Calculate speed (simple 1-second window since this runs every second)
+            let diff_down = session.downloaded_bytes.saturating_sub(session.last_downloaded_bytes);
+            let diff_up = session.uploaded_bytes.saturating_sub(session.last_uploaded_bytes);
+            
+            session.download_speed = diff_down as f64;
+            session.upload_speed = diff_up as f64;
+            
+            session.last_downloaded_bytes = session.downloaded_bytes;
+            session.last_uploaded_bytes = session.uploaded_bytes;
+            
+            download_speed += session.download_speed;
+            upload_speed += session.upload_speed;
+        }
+        
         let mut stats = self.stats.write().await;
-
-        stats.connected_peers = sessions.len();
-        stats.total_downloaded = sessions.values().map(|s| s.downloaded_bytes).sum();
-        stats.total_uploaded = sessions.values().map(|s| s.uploaded_bytes).sum();
-
-        // TODO: Calculate actual speeds based on rate of change
+        stats.connected_peers = connected_peers;
+        stats.total_downloaded = total_downloaded;
+        stats.total_uploaded = total_uploaded;
+        stats.download_speed = download_speed;
+        stats.upload_speed = upload_speed;
     }
 
     /// Update choking algorithm
@@ -794,18 +965,14 @@ impl PeerManager {
             let flags = calculate_flags(session);
             let progress = calculate_progress(session);
             
-            // TODO: Calculate actual speeds based on rate of change
-            let download_speed = 0; // session.downloaded_bytes / time_elapsed
-            let upload_speed = 0; // session.uploaded_bytes / time_elapsed
-            
             super::PeerInfo {
                 ip: addr.ip().to_string(),
                 port: addr.port(),
                 client,
                 flags,
                 progress,
-                download_speed,
-                upload_speed,
+                download_speed: session.download_speed as u64,
+                upload_speed: session.upload_speed as u64,
                 downloaded: session.downloaded_bytes,
                 uploaded: session.uploaded_bytes,
             }

@@ -6,17 +6,17 @@ use crate::engine::TorrentEngine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
-use tokio::sync::RwLock as TokioRwLock;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 /// Global application state
 pub struct AppState {
     /// Active torrent engines (by info_hash hex)
-    pub engines: Arc<TokioRwLock<HashMap<String, Arc<TokioRwLock<TorrentEngine>>>>>,
+    pub engines: Arc<RwLock<HashMap<String, Arc<RwLock<TorrentEngine>>>>>,
 
     /// Running engine task handles to prevent double-spawning
-    pub engine_tasks: Arc<TokioRwLock<HashMap<String, JoinHandle<()>>>>,
+    pub engine_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
 
     /// Active torrents metadata for quick UI access
     pub torrents: Arc<RwLock<HashMap<String, TorrentInfo>>>,
@@ -28,14 +28,14 @@ pub struct AppState {
     pub database: Arc<Database>,
 
     /// Debrid service manager (handles Torbox, Real-Debrid, etc.)
-    pub debrid_manager: Arc<TokioRwLock<DebridManager>>,
+    pub debrid_manager: Arc<RwLock<DebridManager>>,
 
     /// Master password cached in memory (cleared on app exit)
     /// This is used to decrypt API keys when needed
-    pub master_password: Arc<TokioRwLock<Option<String>>>,
+    pub master_password: Arc<RwLock<Option<String>>>,
 
     /// Cloud download task handles (by info_hash)
-    pub cloud_download_tasks: Arc<TokioRwLock<HashMap<String, JoinHandle<()>>>>,
+    pub cloud_download_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
 
     /// Cloud file download progress (by info_hash -> file name -> progress)
     pub cloud_file_progress: Arc<RwLock<HashMap<String, HashMap<String, CloudFileProgress>>>>,
@@ -78,7 +78,8 @@ pub enum CloudFileState {
 
 impl AppState {
     /// Create a new application state
-    pub fn new() -> Self {
+    /// Returns Result to allow graceful error handling in main
+    pub fn new() -> Result<Self, String> {
         // Get config directory
         let config_dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -91,10 +92,10 @@ impl AppState {
 
         // Open database
         let db_path = config_dir.join("data.db");
-        let database = Database::open(&db_path).unwrap_or_else(|e| {
+        let database = Database::open(&db_path).map_err(|e| {
             tracing::error!("Failed to open database at {:?}: {}", db_path, e);
-            panic!("Cannot start without database");
-        });
+            format!("Cannot start without database: {}", e)
+        })?;
 
         tracing::info!("Database opened at: {:?}", db_path);
 
@@ -104,23 +105,25 @@ impl AppState {
         // Initialize debrid manager (providers will be loaded when master password is provided)
         let debrid_manager = DebridManager::new();
 
-        Self {
-            engines: Arc::new(TokioRwLock::new(HashMap::new())),
-            engine_tasks: Arc::new(TokioRwLock::new(HashMap::new())),
+        Ok(Self {
+            engines: Arc::new(RwLock::new(HashMap::new())),
+            engine_tasks: Arc::new(RwLock::new(HashMap::new())),
             torrents: Arc::new(RwLock::new(HashMap::new())),
             settings: Arc::new(RwLock::new(settings.into())),
             database: Arc::new(database),
-            debrid_manager: Arc::new(TokioRwLock::new(debrid_manager)),
-            master_password: Arc::new(TokioRwLock::new(None)),
-            cloud_download_tasks: Arc::new(TokioRwLock::new(HashMap::new())),
+            debrid_manager: Arc::new(RwLock::new(debrid_manager)),
+            master_password: Arc::new(RwLock::new(None)),
+            cloud_download_tasks: Arc::new(RwLock::new(HashMap::new())),
             cloud_file_progress: Arc::new(RwLock::new(HashMap::new())),
-        }
+        })
     }
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::new()
+        Self::new().unwrap_or_else(|e| {
+            panic!("Failed to create default AppState: {}", e);
+        })
     }
 }
 
@@ -209,6 +212,12 @@ pub struct Settings {
 
     /// Dark mode enabled
     pub dark_mode: bool,
+
+    /// Bandwidth scheduler enabled
+    pub bandwidth_scheduler_enabled: bool,
+
+    /// Bandwidth schedule rules
+    pub bandwidth_schedule: Vec<crate::database::BandwidthRule>,
 }
 
 impl Default for Settings {
@@ -222,6 +231,8 @@ impl Default for Settings {
             enable_dht: true,
             enable_pex: true,
             dark_mode: true,
+            bandwidth_scheduler_enabled: false,
+            bandwidth_schedule: Vec::new(),
         }
     }
 }
@@ -238,6 +249,8 @@ impl From<crate::database::AppSettings> for Settings {
             enable_dht: db_settings.enable_dht,
             enable_pex: db_settings.enable_pex,
             dark_mode: true, // Not stored in DB, use default
+            bandwidth_scheduler_enabled: db_settings.bandwidth_scheduler_enabled,
+            bandwidth_schedule: db_settings.bandwidth_schedule,
         }
     }
 }

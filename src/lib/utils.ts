@@ -1,3 +1,6 @@
+import { type ClassValue, clsx } from "clsx";
+import { twMerge } from "tailwind-merge";
+
 // Utility functions for formatting
 
 export function formatBytes(bytes: number, decimals = 2): string {
@@ -19,7 +22,7 @@ export function formatSpeed(bytesPerSecond: number): string {
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.floor(seconds)}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  
+
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   return `${hours}h ${minutes}m`;
@@ -32,16 +35,16 @@ export function formatProgress(downloaded: number, total: number): number {
 
 export function calculateETA(remaining: number, speed: number): string {
   if (speed === 0 || remaining <= 0) return "∞";
-  
+
   const seconds = remaining / speed;
-  
+
   if (seconds < 60) return `${Math.floor(seconds)}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
-  
+
   return `${Math.floor(seconds / 86400)}d`;
 }
 
-export function cn(...inputs: (string | undefined | null | false)[]): string {
-  return inputs.filter(Boolean).join(" ");
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
 }

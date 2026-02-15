@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
 /// Maximum number of concurrent peer connections
 const MAX_PEERS: usize = 50;
@@ -48,6 +49,7 @@ pub struct EngineStats {
     pub total_peers: usize,
     pub progress: f64,        // 0.0 to 1.0
     pub eta_seconds: Option<u64>,
+    pub completed_at: Option<i64>,
 }
 
 /// Command to control the engine
@@ -69,7 +71,7 @@ pub struct TorrentEngine {
     /// Disk I/O manager
     disk_manager: Arc<RwLock<DiskManager>>,
     /// Peer manager
-    peer_manager_tx: Option<mpsc::UnboundedSender<PeerManagerCommand>>,
+    peer_manager_tx: Option<mpsc::Sender<PeerManagerCommand>>,
     /// Available peer addresses
     peer_addresses: Arc<RwLock<HashSet<SocketAddr>>>,
     /// Tracker client
@@ -90,11 +92,18 @@ pub struct TorrentEngine {
     database: Option<Arc<Database>>,
     /// Download directory
     download_dir: PathBuf,
+    /// Cancellation token for cooperative shutdown
+    /// Cancellation token for cooperative shutdown
+    cancel_token: CancellationToken,
+    /// Tauri App Handle for events
+    app_handle: Option<tauri::AppHandle>,
+    /// Time when download completed
+    completed_at: Option<i64>,
 }
 
 impl TorrentEngine {
     /// Create a new torrent engine
-    pub fn new(metainfo: Metainfo, download_dir: PathBuf) -> Self {
+    pub fn new(metainfo: Metainfo, download_dir: PathBuf, app_handle: Option<tauri::AppHandle>) -> Self {
         let peer_id = utils::generate_peer_id();
         let num_pieces = metainfo.info.piece_count;
         let piece_length = metainfo.info.piece_length as usize;
@@ -139,6 +148,7 @@ impl TorrentEngine {
             total_peers: 0,
             progress: 0.0,
             eta_seconds: None,
+            completed_at: None,
         };
 
         Self {
@@ -156,7 +166,15 @@ impl TorrentEngine {
             command_tx,
             database: None,
             download_dir,
+            cancel_token: CancellationToken::new(),
+            app_handle,
+            completed_at: None,
         }
+    }
+
+    /// Set completed_at timestamp (used when restoring state)
+    pub fn set_completed_at(&mut self, timestamp: Option<i64>) {
+        self.completed_at = timestamp;
     }
 
     /// Set database for persistence
@@ -169,6 +187,42 @@ impl TorrentEngine {
         self.command_tx.clone()
     }
 
+    /// Get the cancellation token for this engine
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
+    /// Set priority for a specific file
+    pub async fn set_file_priority(&mut self, file_index: usize, priority: crate::piece::PiecePriority) -> Result<(), String> {
+        // Calculate file range in bytes
+        let files = &self.metainfo.info.files;
+        if file_index >= files.len() {
+            return Err(format!("Invalid file index: {}", file_index));
+        }
+
+        let mut offset = 0;
+        for i in 0..file_index {
+            offset += files[i].length;
+        }
+        let length = files[file_index].length;
+        let end = offset + length;
+
+        // Calculate piece range
+        let piece_length = self.metainfo.info.piece_length as u64;
+        let start_piece = (offset / piece_length) as usize;
+        let end_piece = ((end + piece_length - 1) / piece_length) as usize;
+
+        // Update piece priorities
+        let mut piece_manager = self.piece_manager.write().await;
+        for piece_idx in start_piece..end_piece {
+            if piece_idx < piece_manager.stats().total_pieces {
+                piece_manager.set_piece_priority(piece_idx, priority);
+            }
+        }
+        
+        Ok(())
+    }
+
     /// Run the engine (main event loop)
     pub async fn run(&mut self) {
         let mut tracker_timer = time::interval(TRACKER_ANNOUNCE_INTERVAL);
@@ -177,6 +231,15 @@ impl TorrentEngine {
 
         loop {
             tokio::select! {
+                biased;
+
+                // Cooperative cancellation — highest priority
+                _ = self.cancel_token.cancelled() => {
+                    tracing::info!("Engine received cancellation signal");
+                    self.handle_stop().await;
+                    break;
+                }
+
                 // Handle commands
                 Some(cmd) = self.command_rx.recv() => {
                     match cmd {
@@ -190,7 +253,7 @@ impl TorrentEngine {
                             self.piece_manager.write().await.set_strategy(strategy);
                         }
                         EngineCommand::GetStats(tx) => {
-                            let stats = self.stats.read().await.clone();
+                            let stats = self.get_stats().await;
                             let _ = tx.send(stats);
                         }
                     }
@@ -198,8 +261,9 @@ impl TorrentEngine {
 
                 // Periodic tracker announces
                 _ = tracker_timer.tick() => {
-                    if *self.state.read().await == EngineState::Downloading
-                        || *self.state.read().await == EngineState::Seeding
+                    let current_state = *self.state.read().await;
+                    if current_state == EngineState::Downloading
+                        || current_state == EngineState::Seeding
                     {
                         self.announce_to_tracker().await;
                     }
@@ -208,6 +272,39 @@ impl TorrentEngine {
                 // Update statistics
                 _ = stats_timer.tick() => {
                     self.update_stats().await;
+                    
+                    // Emit update event
+                    if let Some(app) = &self.app_handle {
+                        use tauri::Emitter;
+                        // Construct TorrentInfo for UI
+                        let stats = self.stats.read().await;
+                        let state = match stats.state {
+                            EngineState::Downloading => crate::state::TorrentState::Downloading,
+                            EngineState::Seeding => crate::state::TorrentState::Seeding,
+                            EngineState::Paused => crate::state::TorrentState::Paused,
+                            EngineState::Stopped => crate::state::TorrentState::Paused,
+                            EngineState::Starting => crate::state::TorrentState::Checking,
+                            EngineState::Error => crate::state::TorrentState::Error,
+                        };
+                        
+                        let info = crate::state::TorrentInfo {
+                            id: self.metainfo.info_hash_hex(),
+                            name: self.metainfo.info.name.clone(),
+                            size: self.metainfo.info.total_size,
+                            downloaded: stats.downloaded_bytes,
+                            uploaded: stats.uploaded_bytes,
+                            state,
+                            download_speed: stats.download_speed as u64,
+                            upload_speed: stats.upload_speed as u64,
+                            peers: stats.connected_peers as u32,
+                            seeds: 0, // TODO: Get from tracker stats
+                            source: crate::debrid::types::DownloadSource::P2P,
+                        };
+                        
+                        if let Err(e) = app.emit("torrent-update", info) {
+                            tracing::error!("Failed to emit torrent-update event: {}", e);
+                        }
+                    }
                 }
 
                 // Save progress to database
@@ -224,6 +321,26 @@ impl TorrentEngine {
 
     /// Handle start command
     async fn handle_start(&mut self) {
+        // Check if we are resuming from pause (PeerManager already exists)
+        if let Some(ref tx) = self.peer_manager_tx {
+            tracing::info!("Resuming torrent engine");
+            
+            // Determine state based on completion
+            let pm = self.piece_manager.read().await;
+            let new_state = if pm.is_complete() {
+                EngineState::Seeding
+            } else {
+                EngineState::Downloading
+            };
+            drop(pm);
+
+            *self.state.write().await = new_state;
+            
+            // Resume peer manager
+            let _ = tx.send(PeerManagerCommand::Resume).await;
+            return;
+        }
+
         tracing::info!("Starting torrent engine");
         *self.state.write().await = EngineState::Starting;
 
@@ -242,12 +359,14 @@ impl TorrentEngine {
             return;
         }
 
-        // Start peer manager
+        // Start peer manager with a child cancellation token
+        let peer_cancel = self.cancel_token.child_token();
         let peer_manager = PeerManager::new(
             self.metainfo.info_hash,
             self.peer_id,
             self.piece_manager.clone(),
             self.disk_manager.clone(),
+            peer_cancel,
         );
         
         let peer_manager_tx = peer_manager.command_sender();
@@ -273,7 +392,10 @@ impl TorrentEngine {
         tracing::info!("Pausing torrent engine");
         *self.state.write().await = EngineState::Paused;
 
-        // TODO: Pause peer manager
+        // Pause peer manager
+        if let Some(ref tx) = self.peer_manager_tx {
+            let _ = tx.send(PeerManagerCommand::Pause).await;
+        }
     }
 
     /// Handle stop command
@@ -281,12 +403,19 @@ impl TorrentEngine {
         tracing::info!("Stopping torrent engine");
         *self.state.write().await = EngineState::Stopped;
 
+        // Cancel all child tasks (peer manager, etc.)
+        self.cancel_token.cancel();
+
         // Flush pending writes
         if let Err(e) = self.disk_manager.write().await.flush_writes().await {
             tracing::error!("Failed to flush writes: {}", e);
         }
 
-        // Peer manager will be dropped when engine stops
+        // Save final progress
+        self.save_progress().await;
+
+        // Peer manager will exit via its cancellation token
+        self.peer_manager_tx = None;
 
         // Final tracker announce (stopped)
         // TODO: Implement stopped event
@@ -304,7 +433,7 @@ impl TorrentEngine {
             info_hash: self.metainfo.info_hash,
             peer_id: self.peer_id,
             port: 6881,
-            uploaded: 0,  // TODO: Track upload statistics
+            uploaded: self.stats.read().await.uploaded_bytes,
             downloaded,
             left,
             compact: true,
@@ -423,13 +552,54 @@ impl TorrentEngine {
                 }
                 
                 tracing::info!("Requesting connection to peer: {}", addr);
-                let _ = peer_manager_tx.send(PeerManagerCommand::AddPeer(*addr));
+                let _ = peer_manager_tx.send(PeerManagerCommand::AddPeer(*addr)).await;
             }
         }
     }
 
+    /// Get current engine statistics
+    pub async fn get_stats(&self) -> EngineStats {
+        self.stats.read().await.clone()
+    }
+
+    /// Get current engine state
+    pub async fn get_state(&self) -> EngineState {
+        *self.state.read().await
+    }
+
+    /// Get torrent metainfo
+    pub fn metainfo(&self) -> Arc<Metainfo> {
+        self.metainfo.clone()
+    }
+
+    /// Get list of trackers and their status
+    pub async fn get_tracker_list(&self) -> Vec<crate::tracker::TrackerInfo> {
+        self.tracker_info.read().await.clone()
+    }
+
+    /// Get list of peers from peer manager
+    pub async fn get_peer_list(&self) -> Vec<crate::peer::PeerInfo> {
+        if let Some(ref tx) = self.peer_manager_tx {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            if tx.send(PeerManagerCommand::GetPeerList(resp_tx)).await.is_ok() {
+                return resp_rx.await.unwrap_or_default();
+            }
+        }
+        Vec::new()
+    }
+
+    /// Get the peer manager command sender if available
+    pub fn peer_manager_tx(&self) -> Option<mpsc::Sender<PeerManagerCommand>> {
+        self.peer_manager_tx.clone()
+    }
+
+    /// Get the piece manager
+    pub fn piece_manager(&self) -> Arc<RwLock<PieceManager>> {
+        self.piece_manager.clone()
+    }
+
     /// Update engine statistics
-    async fn update_stats(&self) {
+    async fn update_stats(&mut self) {
         let mut stats = self.stats.write().await;
         let pm = self.piece_manager.read().await;
 
@@ -439,7 +609,7 @@ impl TorrentEngine {
         // Get peer stats from peer manager if available
         if let Some(ref peer_manager_tx) = self.peer_manager_tx {
             let (tx, rx) = oneshot::channel();
-            if peer_manager_tx.send(PeerManagerCommand::GetStats(tx)).is_ok() {
+            if peer_manager_tx.send(PeerManagerCommand::GetStats(tx)).await.is_ok() {
                 if let Ok(peer_stats) = rx.await {
                     stats.connected_peers = peer_stats.connected_peers;
                     stats.downloaded_bytes = peer_stats.total_downloaded;
@@ -458,57 +628,26 @@ impl TorrentEngine {
             stats.eta_seconds = None;
         }
 
+        stats.completed_at = self.completed_at;
+
         // Check if we're complete
-        if pm.is_complete() && stats.state == EngineState::Downloading {
-            drop(stats); // Release lock before modifying state
-            drop(pm);
-            *self.state.write().await = EngineState::Seeding;
-            tracing::info!("Download complete! Now seeding.");
-        }
-    }
-
-    /// Get current engine statistics
-    pub async fn get_stats(&self) -> EngineStats {
-        self.stats.read().await.clone()
-    }
-
-    /// Get current engine state
-    pub async fn get_state(&self) -> EngineState {
-        *self.state.read().await
-    }
-
-    /// Get metainfo
-    pub fn metainfo(&self) -> &Arc<Metainfo> {
-        &self.metainfo
-    }
-
-    /// Get tracker list for UI
-    pub async fn get_tracker_list(&self) -> Vec<crate::tracker::TrackerInfo> {
-        self.tracker_info.read().await.clone()
-    }
-
-    /// Get peer list for UI
-    pub async fn get_peer_list(&self) -> Vec<crate::peer::PeerInfo> {
-        if let Some(ref peer_tx) = self.peer_manager_tx {
-            let (tx, rx) = oneshot::channel();
-            if peer_tx.send(PeerManagerCommand::GetPeerList(tx)).is_ok() {
-                if let Ok(peer_list) = rx.await {
-                    return peer_list;
+        if pm.is_complete() {
+             if stats.state == EngineState::Downloading {
+                drop(stats); // Release lock before modifying state
+                drop(pm);
+                *self.state.write().await = EngineState::Seeding;
+                if self.completed_at.is_none() {
+                    self.completed_at = Some(chrono::Utc::now().timestamp());
+                    tracing::info!("Download complete! Now seeding. Completed at: {:?}", self.completed_at);
                 }
+            } else if self.completed_at.is_none() {
+                // If we started as Seeding but didn't have completed_at set
+                self.completed_at = Some(chrono::Utc::now().timestamp());
             }
         }
-        Vec::new()
     }
 
-    /// Get peer manager command sender for accessing peer list
-    pub fn peer_manager_tx(&self) -> Option<mpsc::UnboundedSender<PeerManagerCommand>> {
-        self.peer_manager_tx.clone()
-    }
-
-    /// Get piece manager for accessing piece info
-    pub fn piece_manager(&self) -> Arc<RwLock<PieceManager>> {
-        self.piece_manager.clone()
-    }
+    // ... (existing methods until save_progress)
 
     /// Save progress to database
     async fn save_progress(&self) {
@@ -516,9 +655,18 @@ impl TorrentEngine {
             let pm = self.piece_manager.read().await;
             let stats = self.stats.read().await;
             let state = *self.state.read().await;
+            let id = hex::encode(self.metainfo.info_hash);
+
+            // Preserve original added_at from existing DB entry
+            let added_at = database
+                .load_torrent(&id)
+                .ok()
+                .flatten()
+                .map(|s| s.added_at)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
             let session = TorrentSession {
-                id: hex::encode(self.metainfo.info_hash),
+                id: id.clone(),
                 metainfo: (*self.metainfo).clone(),
                 bitfield: pm.our_bitfield().as_bytes().to_vec(),
                 num_pieces: pm.our_bitfield().num_pieces(),
@@ -526,9 +674,10 @@ impl TorrentEngine {
                 uploaded: stats.uploaded_bytes,
                 state: format!("{:?}", state).to_lowercase(),
                 download_dir: self.download_dir.to_string_lossy().to_string(),
-                added_at: chrono::Utc::now().timestamp(),
+                added_at,
                 last_activity: chrono::Utc::now().timestamp(),
                 source: crate::debrid::types::DownloadSource::P2P, // Default to P2P
+                completed_at: self.completed_at,
             };
 
             if let Err(e) = database.save_torrent(&session) {
@@ -609,6 +758,7 @@ mod tests {
             total_peers: 10,
             progress: 0.5,
             eta_seconds: Some(120),
+            completed_at: None,
         };
 
         assert_eq!(stats.state, EngineState::Downloading);

@@ -3,7 +3,7 @@ pub mod bitfield;
 pub mod strategy;
 
 pub use bitfield::Bitfield;
-pub use strategy::{PieceSelector, SelectionStrategy};
+pub use strategy::{PieceSelector, SelectionStrategy, PiecePriority};
 
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -136,6 +136,11 @@ impl PieceManager {
         }
     }
 
+    /// Set priority for a piece
+    pub fn set_piece_priority(&mut self, piece_idx: usize, priority: PiecePriority) {
+        self.selector.set_piece_priority(piece_idx, priority);
+    }
+
     /// Add a peer's bitfield to tracking
     pub fn add_peer(&mut self, peer_id: String, peer_bitfield: &Bitfield) {
         self.selector.add_peer(peer_bitfield);
@@ -156,6 +161,23 @@ impl PieceManager {
     /// Get our current bitfield
     pub fn our_bitfield(&self) -> &Bitfield {
         &self.our_bitfield
+    }
+
+    /// Restore bitfield from saved state (e.g., from database)
+    /// Marks all pieces in the saved bitfield as verified and complete
+    pub fn restore_bitfield(&mut self, saved_bitfield: &[u8]) {
+        let restored = Bitfield::from_bytes(saved_bitfield.to_vec(), self.num_pieces);
+        for i in 0..self.num_pieces {
+            if restored.has_piece(i) {
+                self.our_bitfield.set_piece(i);
+                self.verified_pieces.insert(i);
+            }
+        }
+        tracing::info!(
+            "Restored bitfield: {}/{} pieces verified",
+            self.verified_pieces.len(),
+            self.num_pieces
+        );
     }
 
     /// Check if we have a specific piece
@@ -263,6 +285,26 @@ impl PieceManager {
         Ok(state.is_complete())
     }
 
+    /// Mark a block as failed (e.g., due to timeout)
+    /// This removes it from downloaded_blocks so it can be re-requested
+    pub fn mark_block_failed(&mut self, block: BlockInfo) -> Result<(), String> {
+        let state = self
+            .in_progress
+            .get_mut(&block.piece_index)
+            .ok_or_else(|| format!("Piece {} not in progress", block.piece_index))?;
+
+        // Remove block from downloaded blocks so it will appear in missing_blocks()
+        state.downloaded_blocks.remove(&block.offset);
+
+        tracing::debug!(
+            "Marked block failed: piece {} offset {} - will be re-requested",
+            block.piece_index,
+            block.offset
+        );
+
+        Ok(())
+    }
+
     /// Verify and finalize a completed piece
     /// Returns the piece data if verification succeeds
     pub fn verify_piece(&mut self, piece_index: usize) -> Result<Vec<u8>, String> {
@@ -365,6 +407,44 @@ impl PieceManager {
             bitfield: bitfield_state,
             availability,
         }
+    }
+
+    /// Calculate downloaded bytes for a list of files based on current pieces
+    pub fn calculate_file_progress(&self, files: &[crate::torrent::FileInfo]) -> Vec<u64> {
+        let mut file_downloaded = Vec::with_capacity(files.len());
+        let mut current_offset: u64 = 0;
+        let piece_len = self.piece_length as u64;
+
+        for file in files {
+            let mut downloaded: u64 = 0;
+            let file_start = current_offset;
+            let file_end = current_offset + file.length;
+
+            if file.length > 0 {
+                let first_piece = (file_start / piece_len) as usize;
+                let last_piece = ((file_end.saturating_sub(1)) / piece_len) as usize;
+
+                for piece_idx in first_piece..=last_piece {
+                    if self.our_bitfield.has_piece(piece_idx) {
+                        let piece_start = piece_idx as u64 * piece_len;
+                        let piece_end = piece_start + self.piece_len(piece_idx) as u64;
+
+                        // Intersection of [file_start, file_end) and [piece_start, piece_end)
+                        let overlap_start = std::cmp::max(file_start, piece_start);
+                        let overlap_end = std::cmp::min(file_end, piece_end);
+
+                        if overlap_end > overlap_start {
+                            downloaded += overlap_end - overlap_start;
+                        }
+                    }
+                }
+            }
+
+            file_downloaded.push(downloaded);
+            current_offset += file.length;
+        }
+
+        file_downloaded
     }
 }
 

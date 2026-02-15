@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
 
 const BASE_URL: &str = "https://api.torbox.app/v1/api";
 const MIN_REQUEST_INTERVAL_MS: u64 = 200; // Conservative rate limit
@@ -19,99 +18,199 @@ impl TorboxProvider {
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to create HTTP client"),
             queue: RequestQueue::new(MIN_REQUEST_INTERVAL_MS, "Torbox".to_string()),
         }
     }
 
-    /// Helper method to execute HTTP requests with rate limiting
+    /// Helper method to execute HTTP requests with rate limiting and retries
     async fn get<T>(&self, endpoint: &str, params: Option<&[(&str, &str)]>) -> Result<T>
     where
         T: serde::de::DeserializeOwned,
     {
-        let url = format!("{}{}", BASE_URL, endpoint);
-        let api_key = self.api_key.clone();
-        let client = self.client.clone();
-        let query_params = params.map(|p| p.to_vec());
+        let url_base = format!("{}{}", BASE_URL, endpoint);
+        // Convert params to owned Vec for cloning
+        let query_params_base = params.map(|p| p.to_vec());
+        
+        let max_retries = 3;
+        let mut retry_count = 0;
 
-        self.queue
-            .execute(async move {
-                let mut request = client
-                    .get(&url)
-                    .header("Authorization", format!("Bearer {}", api_key));
+        loop {
+            let url = url_base.clone();
+            let api_key = self.api_key.clone();
+            let client = self.client.clone();
+            let query_params = query_params_base.clone();
 
-                if let Some(params) = query_params {
-                    request = request.query(&params);
+            let result = self.queue
+                .execute(async move {
+                    let mut request = client
+                        .get(&url)
+                        .header("Authorization", format!("Bearer {}", api_key));
+
+                    if let Some(params) = query_params {
+                        request = request.query(&params);
+                    }
+
+                    let response = request.send().await?;
+
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_default();
+                        
+                        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                            return Err(anyhow!("Transient error {}: {}", status, error_text));
+                        }
+
+                        return Err(anyhow!("Torbox API error {}: {}", status, error_text));
+                    }
+
+                    Ok(response.json().await?)
+                })
+                .await;
+
+            match result {
+                Ok(val) => return Ok(val),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    let is_transient = err_str.contains("Transient error") 
+                        || err_str.contains("connection closed") 
+                        || err_str.contains("timed out")
+                        || err_str.contains("connect error");
+
+                    if is_transient && retry_count < max_retries {
+                        retry_count += 1;
+                        let delay = std::time::Duration::from_secs(2u64.pow(retry_count));
+                        tracing::warn!("Torbox request failed (attempt {}/{}), retrying in {:?}: {}", retry_count, max_retries, delay, e);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(e);
                 }
-
-                let response = request.send().await?;
-
-                if !response.status().is_success() {
-                    let status = response.status();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("Torbox API error {}: {}", status, error_text));
-                }
-
-                Ok(response.json().await?)
-            })
-            .await
+            }
+        }
     }
 
-    /// Helper method to execute POST requests with rate limiting
+    /// Helper method to execute POST requests with rate limiting and retries
     async fn post<T>(&self, endpoint: &str, json_body: Option<serde_json::Value>) -> Result<T>
     where
         T: serde::de::DeserializeOwned,
     {
-        let url = format!("{}{}", BASE_URL, endpoint);
-        let api_key = self.api_key.clone();
-        let client = self.client.clone();
+        let url_base = format!("{}{}", BASE_URL, endpoint);
+        let max_retries = 3;
+        let mut retry_count = 0;
 
-        self.queue
-            .execute(async move {
-                let mut request = client
-                    .post(&url)
-                    .header("Authorization", format!("Bearer {}", api_key));
+        loop {
+            let url = url_base.clone();
+            let api_key = self.api_key.clone();
+            let client = self.client.clone();
+            let body = json_body.clone();
 
-                if let Some(body) = json_body {
-                    request = request.json(&body);
+            let result = self.queue
+                .execute(async move {
+                    let mut request = client
+                        .post(&url)
+                        .header("Authorization", format!("Bearer {}", api_key));
+
+                    if let Some(b) = body {
+                        request = request.json(&b);
+                    }
+
+                    let response = request.send().await?;
+
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_default();
+                        
+                        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                            return Err(anyhow!("Transient error {}: {}", status, error_text));
+                        }
+
+                        return Err(anyhow!("Torbox API error {}: {}", status, error_text));
+                    }
+
+                    Ok(response.json().await?)
+                })
+                .await;
+
+            match result {
+                Ok(val) => return Ok(val),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    let is_transient = err_str.contains("Transient error") 
+                        || err_str.contains("connection closed") 
+                        || err_str.contains("timed out")
+                        || err_str.contains("connect error");
+
+                    if is_transient && retry_count < max_retries {
+                        retry_count += 1;
+                        let delay = std::time::Duration::from_secs(2u64.pow(retry_count));
+                        tracing::warn!("Torbox request failed (attempt {}/{}), retrying in {:?}: {}", retry_count, max_retries, delay, e);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(e);
                 }
-
-                let response = request.send().await?;
-
-                if !response.status().is_success() {
-                    let status = response.status();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("Torbox API error {}: {}", status, error_text));
-                }
-
-                Ok(response.json().await?)
-            })
-            .await
+            }
+        }
     }
 
-    /// Helper method to execute DELETE requests with rate limiting
+    /// Helper method to execute DELETE requests with rate limiting and retries
     async fn delete(&self, endpoint: &str) -> Result<()> {
-        let url = format!("{}{}", BASE_URL, endpoint);
-        let api_key = self.api_key.clone();
-        let client = self.client.clone();
+        let url_base = format!("{}{}", BASE_URL, endpoint);
+        let max_retries = 3;
+        let mut retry_count = 0;
 
-        self.queue
-            .execute(async move {
-                let response = client
-                    .delete(&url)
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .send()
-                    .await?;
+        loop {
+            let url = url_base.clone();
+            let api_key = self.api_key.clone();
+            let client = self.client.clone();
 
-                if !response.status().is_success() {
-                    let status = response.status();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("Torbox API error {}: {}", status, error_text));
+            let result = self.queue
+                .execute(async move {
+                    let response = client
+                        .delete(&url)
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .send()
+                        .await?;
+
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_default();
+                        
+                        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                            return Err(anyhow!("Transient error {}: {}", status, error_text));
+                        }
+
+                        return Err(anyhow!("Torbox API error {}: {}", status, error_text));
+                    }
+
+                    Ok(())
+                })
+                .await;
+
+            match result {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    let is_transient = err_str.contains("Transient error") 
+                        || err_str.contains("connection closed") 
+                        || err_str.contains("timed out")
+                        || err_str.contains("connect error");
+
+                    if is_transient && retry_count < max_retries {
+                        retry_count += 1;
+                        let delay = std::time::Duration::from_secs(2u64.pow(retry_count));
+                        tracing::warn!("Torbox request failed (attempt {}/{}), retrying in {:?}: {}", retry_count, max_retries, delay, e);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(e);
                 }
-
-                Ok(())
-            })
-            .await
+            }
+        }
     }
 }
 
@@ -170,7 +269,7 @@ impl DebridProvider for TorboxProvider {
                     "/torrents/mylist",
                     Some(&[("limit", "1"), ("offset", "0")]),
                 ).await {
-                    Ok(response) => {
+                    Ok(_response) => {
                         tracing::info!("Torbox /torrents/mylist succeeded");
                         // Even if the response has data: null, it means the API key is valid
                         // (just no torrents in the account)
@@ -331,7 +430,7 @@ impl DebridProvider for TorboxProvider {
         Err(anyhow!("Torbox doesn't support generic link unrestriction"))
     }
 
-    async fn delete_torrent(&self, torrent_id: &str) -> Result<()> {
+    async fn delete_torrent(&self, _torrent_id: &str) -> Result<()> {
         // Torbox API doesn't expose torrent deletion via their documented endpoints
         Err(anyhow!("Torbox delete_torrent not yet implemented - API endpoint not documented"))
     }

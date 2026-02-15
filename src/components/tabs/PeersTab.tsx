@@ -1,5 +1,8 @@
 import { TorrentInfo } from "../../types";
 import { formatSpeed, formatBytes } from "../../lib/utils";
+import { Button } from "../ui/Button";
+import { Plus, Ban } from "lucide-react";
+import { cn } from "../../lib/utils";
 
 interface PeersTabProps {
   torrent: TorrentInfo;
@@ -19,7 +22,7 @@ interface PeerInfo {
 }
 
 export function PeersTab({ torrent: _torrent }: PeersTabProps) {
-  // Mock peer data - will be replaced with real data in Phase 8C
+  // Mock peer data
   const peers: PeerInfo[] = [
     {
       ip: "192.168.1.100",
@@ -97,152 +100,132 @@ export function PeersTab({ torrent: _torrent }: PeersTabProps) {
 
   const getFlagColor = (flag: string) => {
     switch (flag) {
-      case "D":
-        return "text-primary";
-      case "U":
-        return "text-success";
-      case "O":
-        return "text-warning";
-      case "S":
-        return "text-error";
-      case "E":
-        return "text-info";
-      default:
-        return "text-gray-400";
+      case "D": return "text-primary";
+      case "U": return "text-success";
+      case "O": return "text-warning";
+      case "S": return "text-error";
+      case "E": return "text-info";
+      default: return "text-text-tertiary";
     }
   };
 
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="p-3 border-b border-dark-border flex items-center gap-2">
-        <button className="px-3 py-1.5 text-sm bg-primary hover:bg-primary-hover text-white rounded-md transition-colors">
-          Add Peer
-        </button>
-        <button className="px-3 py-1.5 text-sm bg-dark-elevated hover:bg-dark-border text-gray-300 rounded-md transition-colors">
-          Ban Selected
-        </button>
-        <div className="flex-1" />
-        <div className="flex items-center gap-4 text-sm">
-          <span className="text-gray-400">
-            {peers.length} peer{peers.length !== 1 ? "s" : ""}
-          </span>
-          <span className="text-gray-400">
-            Seeds: {peers.filter((p) => p.progress >= 100).length}
-          </span>
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="primary" leftIcon={<Plus className="h-3.5 w-3.5" />}>
+            Add Peer
+          </Button>
+          <Button size="sm" variant="danger" leftIcon={<Ban className="h-3.5 w-3.5" />}>
+            Ban Selected
+          </Button>
+        </div>
+        <div className="flex items-center gap-4 text-xs text-text-tertiary font-medium px-2">
+          <span>{peers.length} peer{peers.length !== 1 ? "s" : ""}</span>
+          <span>Seeds: {peers.filter((p) => p.progress >= 100).length}</span>
         </div>
       </div>
 
       {/* Peers table */}
-      <div className="flex-1 overflow-auto custom-scrollbar">
-        {peers.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-gray-400">
-            <div className="text-6xl mb-4">👥</div>
-            <p className="text-lg font-medium">No peers connected</p>
-            <p className="text-sm">Waiting for peer connections...</p>
-          </div>
-        ) : (
-          <table className="w-full">
-            <thead className="bg-dark-secondary sticky top-0 z-10">
-              <tr className="text-xs text-gray-400 uppercase">
-                <th className="text-left p-3 font-semibold w-36">IP Address</th>
-                <th className="text-left p-3 font-semibold">Client</th>
-                <th className="text-center p-3 font-semibold w-20">Flags</th>
-                <th className="text-right p-3 font-semibold w-24">Progress</th>
-                <th className="text-right p-3 font-semibold w-28">Down Speed</th>
-                <th className="text-right p-3 font-semibold w-28">Up Speed</th>
-                <th className="text-right p-3 font-semibold w-28">Downloaded</th>
-                <th className="text-right p-3 font-semibold w-28">Uploaded</th>
+      <div className="bg-dark-surface-elevated border border-dark-border rounded-lg overflow-hidden flex-1">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-dark-bg/50 border-b border-dark-border text-xs uppercase text-text-tertiary font-medium">
+              <tr>
+                <th className="px-4 py-3 w-40">IP Address</th>
+                <th className="px-4 py-3">Client</th>
+                <th className="px-4 py-3 text-center w-24">Flags</th>
+                <th className="px-4 py-3 text-right w-28">Progress</th>
+                <th className="px-4 py-3 text-right w-24">Down</th>
+                <th className="px-4 py-3 text-right w-24">Up</th>
+                <th className="px-4 py-3 text-right w-24">Downloaded</th>
+                <th className="px-4 py-3 text-right w-24">Uploaded</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-dark-border">
               {peers.map((peer, index) => (
-                <tr
-                  key={index}
-                  className="border-b border-dark-border hover:bg-dark-elevated transition-colors text-sm"
-                >
-                  <td className="p-3">
+                <tr key={index} className="hover:bg-dark-surface-hover transition-colors">
+                  <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
                       {peer.country && (
-                        <span className="text-lg" title={peer.country}>
+                        <span className="text-lg leading-none" title={peer.country}>
                           {getCountryFlag(peer.country)}
                         </span>
                       )}
-                      <span className="font-mono text-xs text-white">
+                      <span className="font-mono text-xs text-text-primary">
                         {peer.ip}:{peer.port}
                       </span>
                     </div>
                   </td>
-                  <td className="p-3 text-gray-300">{peer.client}</td>
-                  <td className="p-3 text-center">
-                    <div className="flex justify-center gap-1" title={getFlagDescription(peer.flags)}>
+                  <td className="px-4 py-3 text-text-secondary text-xs">{peer.client}</td>
+                  <td className="px-4 py-3 text-center">
+                    <div className="flex justify-center gap-0.5" title={getFlagDescription(peer.flags)}>
                       {peer.flags.split("").map((flag, i) => (
-                        <span key={i} className={`font-semibold ${getFlagColor(flag)}`}>
+                        <span key={i} className={cn("font-bold font-mono", getFlagColor(flag))}>
                           {flag}
                         </span>
                       ))}
                     </div>
                   </td>
-                  <td className="p-3 text-right">
+                  <td className="px-4 py-3 text-right">
                     <div className="flex flex-col items-end gap-1">
-                      <span className={peer.progress >= 100 ? "text-success" : "text-gray-300"}>
+                      <span className={cn("text-xs font-medium", peer.progress >= 100 ? "text-success" : "text-text-secondary")}>
                         {peer.progress.toFixed(1)}%
                       </span>
-                      <div className="w-16 bg-dark-border rounded-full h-1 overflow-hidden">
+                      <div className="w-16 bg-dark-bg rounded-full h-1 overflow-hidden border border-dark-border/30">
                         <div
-                          className={`h-full rounded-full ${
-                            peer.progress >= 100 ? "bg-success" : "bg-primary"
-                          }`}
+                          className={cn("h-full rounded-full", peer.progress >= 100 ? "bg-success" : "bg-primary")}
                           style={{ width: `${Math.min(peer.progress, 100)}%` }}
                         />
                       </div>
                     </div>
                   </td>
-                  <td className="p-3 text-right text-primary">
+                  <td className="px-4 py-3 text-right text-primary font-mono text-xs">
                     {peer.downloadSpeed > 0 ? formatSpeed(peer.downloadSpeed) : "-"}
                   </td>
-                  <td className="p-3 text-right text-success">
+                  <td className="px-4 py-3 text-right text-success font-mono text-xs">
                     {peer.uploadSpeed > 0 ? formatSpeed(peer.uploadSpeed) : "-"}
                   </td>
-                  <td className="p-3 text-right text-gray-300">
+                  <td className="px-4 py-3 text-right text-text-tertiary text-xs">
                     {peer.downloaded > 0 ? formatBytes(peer.downloaded) : "-"}
                   </td>
-                  <td className="p-3 text-right text-gray-300">
+                  <td className="px-4 py-3 text-right text-text-tertiary text-xs">
                     {peer.uploaded > 0 ? formatBytes(peer.uploaded) : "-"}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        )}
+        </div>
       </div>
 
       {/* Legend */}
-      <div className="p-3 border-t border-dark-border bg-dark-secondary">
-        <div className="flex flex-wrap gap-4 text-xs">
+      <div className="mt-4 p-3 border-t border-dark-border bg-dark-surface-elevated/50 rounded-lg">
+        <div className="flex flex-wrap gap-4 text-[10px] text-text-secondary">
           <div className="flex items-center gap-1">
-            <span className="text-primary font-semibold">D</span>
-            <span className="text-gray-400">= Downloading</span>
+            <span className="text-primary font-bold">D</span>
+            <span>Downloading</span>
           </div>
           <div className="flex items-center gap-1">
-            <span className="text-success font-semibold">U</span>
-            <span className="text-gray-400">= Uploading</span>
+            <span className="text-success font-bold">U</span>
+            <span>Uploading</span>
           </div>
           <div className="flex items-center gap-1">
-            <span className="text-gray-400 font-semibold">I</span>
-            <span className="text-gray-400">= Interested</span>
+            <span className="text-text-tertiary font-bold">I</span>
+            <span>Interested</span>
           </div>
           <div className="flex items-center gap-1">
-            <span className="text-warning font-semibold">O</span>
-            <span className="text-gray-400">= Optimistic</span>
+            <span className="text-warning font-bold">O</span>
+            <span>Optimistic</span>
           </div>
           <div className="flex items-center gap-1">
-            <span className="text-error font-semibold">S</span>
-            <span className="text-gray-400">= Snubbed</span>
+            <span className="text-error font-bold">S</span>
+            <span>Snubbed</span>
           </div>
           <div className="flex items-center gap-1">
-            <span className="text-info font-semibold">E</span>
-            <span className="text-gray-400">= Encrypted</span>
+            <span className="text-info font-bold">E</span>
+            <span>Encrypted</span>
           </div>
         </div>
       </div>
@@ -252,16 +235,8 @@ export function PeersTab({ torrent: _torrent }: PeersTabProps) {
 
 function getCountryFlag(countryCode: string): string {
   const flags: { [key: string]: string } = {
-    US: "🇺🇸",
-    CA: "🇨🇦",
-    GB: "🇬🇧",
-    DE: "🇩🇪",
-    FR: "🇫🇷",
-    JP: "🇯🇵",
-    CN: "🇨🇳",
-    AU: "🇦🇺",
-    BR: "🇧🇷",
-    IN: "🇮🇳",
+    US: "🇺🇸", CA: "🇨🇦", GB: "🇬🇧", DE: "🇩🇪", FR: "🇫🇷",
+    JP: "🇯🇵", CN: "🇨🇳", AU: "🇦🇺", BR: "🇧🇷", IN: "🇮🇳",
   };
   return flags[countryCode] || "🌐";
 }

@@ -136,34 +136,10 @@ export const api = {
 
   async setFilePriority(
     torrentId: string,
-    filePath: string,
-    priority: "Skip" | "Low" | "Normal" | "High",
+    fileIndex: number,
+    priority: number,
   ): Promise<void> {
-    return invoke("set_file_priority", { torrentId, filePath, priority });
-  },
-
-  // Debrid - Master Password operations
-  async checkMasterPasswordSet(): Promise<boolean> {
-    return invoke("check_master_password_set");
-  },
-
-  async setMasterPassword(password: string): Promise<void> {
-    return invoke("set_master_password", { password });
-  },
-
-  async unlockWithMasterPassword(password: string): Promise<boolean> {
-    return invoke("unlock_with_master_password", { password });
-  },
-
-  async changeMasterPassword(
-    oldPassword: string,
-    newPassword: string,
-  ): Promise<void> {
-    return invoke("change_master_password", { oldPassword, newPassword });
-  },
-
-  async lockDebridServices(): Promise<void> {
-    return invoke("lock_debrid_services");
+    return invoke("set_file_priority", { torrentId, fileIndex, priority });
   },
 
   // Debrid - Credential Management
@@ -256,5 +232,21 @@ export const api = {
   // System utilities
   async getAvailableDiskSpace(path: string): Promise<number> {
     return invoke("get_available_disk_space", { path });
+  },
+
+  async backupData(): Promise<string> {
+    return invoke("backup_data");
+  },
+
+  async restoreData(json: string): Promise<void> {
+    return invoke("restore_data", { json });
+  },
+
+  async exportBackup(path: string): Promise<void> {
+    return invoke("export_backup", { path });
+  },
+
+  async importBackup(path: string): Promise<void> {
+    return invoke("import_backup", { path });
   },
 };
